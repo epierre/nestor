@@ -7,7 +7,7 @@
 ## 2. Model client
 
 - [x] 2.1 Implement OpenAI-compatible chat completions client (messages, tools, usage, cost header/field). Test: `client_test.go` against `httptest` server replaying recorded responses.
-- [ ] 2.2 Timeout and single retry on 5xx only. Test: `client_test.go` "503 retried once", "400 not retried", "timeout returns error".
+- [x] 2.2 Timeout and single retry on 5xx only. Test: `client_test.go` "503 retried once", "400 not retried", "timeout returns error".
 
 ## 3. Persistence
 
