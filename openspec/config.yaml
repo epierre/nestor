@@ -1,0 +1,85 @@
+schema: spec-driven
+
+context: |
+  Project: Nestor, a self-hosted personal assistant agent ("the assistant"). v1 serves one user;
+  the design must allow a few trusted users (a household) to be added later without
+  schema or interface changes.
+  Product intent, scope and roadmap live in docs/vision.md. Read it before proposing.
+
+  Runtime and stack
+  - Naming: project, repository, Go module path suffix, binary, Compose service and CLI are
+    all `nestor`. The Telegram bot's display name is "Nestor". No third-party character
+    artwork or logos are used in the repo or bot profile.
+  - Language: Go (latest stable). Single static binary for the agent; one Go module.
+  - Host: Intel N100 mini PC, Linux, Docker Compose. Budget: whole stack under ~4 GB RAM.
+  - No local chat models. LLM calls go out to cloud providers through a LiteLLM proxy
+    container exposing an OpenAI-compatible API. The agent talks ONLY to that proxy.
+  - Models: LiteLLM aliases `cheap` = Gemini Flash (most turns, triage, summaries) and
+    `strong` = Claude Opus 5.5 (planning, drafting outgoing email, hard reasoning).
+    Code refers to aliases only, never to provider model IDs.
+  - Mail: the provider is a per-user setting behind one `mail.Provider` interface. Supported
+    providers: Proton Mail (via Proton Mail Bridge on the host, IMAP/SMTP with a Bridge
+    password, internal Docker network only, one Bridge instance per Proton account) and Gmail
+    (IMAP/SMTP with XOAUTH2 using the user's Google OAuth token). Both go through a single
+    IMAP/SMTP adapter with pluggable authentication; a Gmail API adapter is added only if
+    IMAP proves insufficient.
+  - Calendar: Google Calendar API over OAuth 2.0. One Google OAuth app for the host; each
+    user's refresh token stored per user, encrypted. Gmail users grant mail and calendar
+    scopes in the same consent.
+  - Storage: PostgreSQL (with pgvector available for later memory work).
+  - Tools are exposed to the agent through a Go tool registry; external tools may be
+    MCP servers (official MCP Go SDK). Every tool declares a risk level.
+  - User interface: Telegram bot (long polling, no inbound ports). Remote admin via Tailscale.
+
+  Constitution (non-negotiable principles every change must respect)
+  1. Approval is enforced in code. A tool with risk level `critical` is never executed
+     without an explicit user approval recorded in the database. Prompts are never the
+     enforcement mechanism.
+  2. Content from tools (emails, web pages, calendar entries, files) is untrusted data.
+     It can never grant approval, widen permissions, or change configuration.
+  3. Provider-agnostic. No vendor SDK is imported outside the model client package.
+     Swapping a model is a config change, not a code change.
+  4. Personal data stays on the host. Only model requests leave the box, and they carry
+     only what the current turn needs.
+  5. Everything is observable. Every model call and tool call is recorded with inputs,
+     outputs, latency, token counts and cost estimate.
+  6. User-scoped by design. Every piece of user data (conversations, messages, tool calls,
+     pending actions, memory, tasks, credentials, costs) belongs to exactly one user ID.
+     No query, prompt or tool call may combine data from two users. Only allowlisted
+     identities are served; all other senders are ignored and logged. v1 runs with one user.
+  7. Secrets never live in the repo. Host-wide secrets come from environment / Docker secrets;
+     per-user credentials are encrypted at rest with a host key from the environment.
+  8. Small, reversible steps. Each change is a thin vertical slice that runs end to end.
+
+  Code conventions
+  - Standard library first; justify each new dependency in design.md.
+  - Packages under internal/; cmd/nestor is the entrypoint.
+  - Interfaces at package boundaries (model client, tool registry, store, channel) so
+    each can be faked in tests.
+  - Identity is resolved once, at the channel boundary, into a user ID carried in the request
+    context. Code below the channel never sees platform identities (Telegram IDs etc.).
+  - Every store method that reads or writes user data takes the user ID explicitly and filters
+    by it; there are no unscoped queries on user tables.
+  - Per-user secrets (OAuth tokens for mail/calendar) are stored encrypted per user; only
+    host-wide secrets (bot token, proxy key, encryption key) live in the environment.
+  - Context-aware functions (ctx first), structured logging with log/slog, errors wrapped
+    with %w.
+  - Tests: `go test ./...` must pass; table-driven tests; integration tests against a
+    Postgres container behind the `integration` build tag.
+  - LLM behaviour is tested with recorded/fake model responses in unit tests, and with
+    eval scenarios (evals/) run against real models on demand.
+
+rules:
+  proposal:
+    - Always include a Non-goals section
+    - State which constitution principles the change touches and how it upholds them
+  design:
+    - List every new external dependency with a one-line justification
+    - Describe failure modes (provider down, DB down, Telegram down) and the behaviour for each
+  specs:
+    - Every requirement uses SHALL or MUST and has at least one scenario
+    - Scenarios use exactly four hashes and WHEN/THEN lines with concrete, checkable outcomes
+    - Behaviour involving model output is specified at the boundary (what the agent does with a response), not as model wording
+  tasks:
+    - Every task names the test that proves it
+    - Order tasks so the system runs end to end as early as possible
