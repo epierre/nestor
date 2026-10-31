@@ -1,0 +1,6 @@
+# Allowlist, so deploy/.env and anything added later stay out of the build context.
+*
+!go.mod
+!go.sum
+!cmd
+!internal

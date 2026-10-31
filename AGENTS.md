@@ -129,7 +129,7 @@ go test -tags integration ./...             # needs Docker (Postgres container)
 go test -tags eval ./evals/...              # real models via LiteLLM; costs money; only when asked
 openspec validate --all --strict            # before every commit that touches openspec/
 openspec show <change> --type change --diff # review a change's deltas against current specs
-docker compose -f deploy/docker-compose.yml config   # compose file is valid
+docker compose --env-file deploy/.env.example -f deploy/docker-compose.yml config   # compose file is valid
 ```
 
 ## Definition of done for a change

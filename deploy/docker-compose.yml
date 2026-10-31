@@ -1,0 +1,82 @@
+# Each service receives only the variables it needs, so a compromised LiteLLM never sees the bot
+# token and Nestor never sees a provider key. Nothing publishes a port: Nestor long-polls Telegram.
+name: nestor
+
+services:
+  nestor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set it in deploy/.env}
+      ALLOWED_TELEGRAM_USERS: ${ALLOWED_TELEGRAM_USERS:?set it in deploy/.env}
+      DATABASE_URL: postgres://nestor:${POSTGRES_PASSWORD:?set it in deploy/.env}@postgres:5432/nestor?sslmode=disable
+      LLM_BASE_URL: http://litellm:4000/v1
+      LLM_API_KEY: ${LITELLM_MASTER_KEY:?set it in deploy/.env}
+      LLM_MODEL: ${LLM_MODEL:-}
+      HISTORY_LIMIT: ${HISTORY_LIMIT:-}
+      MAX_LOOP_ITERATIONS: ${MAX_LOOP_ITERATIONS:-}
+    networks:
+      - default
+      - database
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nestor
+      POSTGRES_DB: nestor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in deploy/.env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nestor -d nestor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 1g
+
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.106.6@sha256:37e2dafb088a7723beb998590682957386dfc83ffea1848486f8e0e5cfac0b06
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set it in deploy/.env}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?set it in deploy/.env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set it in deploy/.env}
+      # Use the cost map bundled with the pinned image instead of fetching one at startup.
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    volumes:
+      - ./litellm.yaml:/app/config.yaml:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    mem_limit: 2g
+
+networks:
+  # No route out, and LiteLLM is not attached: only Nestor can reach Postgres.
+  database:
+    internal: true
+
+volumes:
+  postgres-data:
