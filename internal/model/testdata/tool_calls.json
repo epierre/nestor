@@ -1,0 +1,39 @@
+{
+  "id": "chatcmpl-test-tools",
+  "object": "chat.completion",
+  "created": 1793000000,
+  "model": "cheap",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "tool_calls",
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "current_time",
+              "arguments": "{\"zone\":\"Europe/Paris\"}"
+            }
+          },
+          {
+            "id": "call_2",
+            "type": "function",
+            "function": {
+              "name": "list_events",
+              "arguments": "{}"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 40,
+    "completion_tokens": 18,
+    "total_tokens": 58
+  }
+}
