@@ -1,6 +1,6 @@
 ## 1. Skeleton that runs
 
-- [ ] 1.1 Create Go module, `cmd/nestor/main.go`, `internal/config` loading env vars with validation, including parsing `ALLOWED_TELEGRAM_USERS`. Test: `config_test.go` covers missing required variable, malformed allowlist entry, and no secret in error text.
+- [x] 1.1 Create Go module, `cmd/nestor/main.go`, `internal/config` loading env vars with validation, including parsing `ALLOWED_TELEGRAM_USERS`. Test: `config_test.go` covers missing required variable, malformed allowlist entry, and no secret in error text.
 - [ ] 1.2 Add `deploy/docker-compose.yml` (nestor, postgres, litellm) and `deploy/litellm.yaml` with aliases `cheap` (Gemini Flash) and `strong` (Claude Opus 5.5). Test: `docker compose config` succeeds in CI; manual smoke noted in README.
 - [ ] 1.3 Define interfaces `Channel`, `ModelClient`, `Store` and the `Agent` struct with fakes in `internal/testutil`; add `internal/identity` with `WithUser`/`UserFrom` context helpers. Test: `agent_test.go` "replies with fake model output", `identity_test.go` "missing user returns error".
 
