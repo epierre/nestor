@@ -8,9 +8,10 @@ It is named after the unflappable, discreet butler of the Tintin stories (and th
 counsellor of Greek myth). It is also a learning project: understanding how agents are built,
 hosted and evaluated matters as much as the end result.
 
-> **Status: design phase.** There is no code to run yet. This repository currently holds the
-> product vision and the OpenSpec changes for the first pieces of the system. Everything below
-> describes the intended design, not working software.
+> **Status: early implementation.** The Compose stack starts, but Nestor cannot chat yet: it
+> only validates its configuration and waits. This repository mainly holds the product vision
+> and the OpenSpec changes for the first pieces of the system. Unless a section says otherwise,
+> everything below describes the intended design, not working software.
 
 ## What it will do
 
@@ -86,10 +87,31 @@ Changes 9 and 10 depend only on change 2 and can be pulled earlier. No change is
 ## Repository layout
 
 ```
+cmd/nestor/          Entrypoint
+internal/            Application packages
+deploy/              Docker Compose stack and LiteLLM configuration
 docs/vision.md       Product intent, users, success criteria, roadmap, open questions
 openspec/config.yaml Stack, constitution, code conventions and spec rules
 openspec/changes/    One folder per change: proposal, design, specs and tasks
 ```
+
+## Running the stack
+
+You need Docker with the Compose plugin, a Telegram bot token, and Gemini and Anthropic API keys.
+
+```sh
+cp deploy/.env.example deploy/.env   # then replace every value
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+### Manual smoke test
+
+1. `docker compose -f deploy/docker-compose.yml ps` shows `postgres` and `litellm` as healthy
+   and `nestor` as running.
+2. `docker compose -f deploy/docker-compose.yml logs nestor` shows `nestor started`, with no
+   secret in the output.
+3. Once the Telegram channel exists (task 5.2), message the bot, get a reply, and check that a
+   `model_calls` row was written. Until then, stop at step 2.
 
 ## Contributing
 
