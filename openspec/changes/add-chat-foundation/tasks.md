@@ -23,8 +23,8 @@
 
 ## 5. Telegram channel
 
-- [ ] 5.1 Long-poll client with offset advanced only after handling, backoff on failure. Test: `telegram_test.go` against fake Bot API server, "update re-delivered after crash", "backoff on 502".
-- [ ] 5.2 Identity resolution (Telegram ID to user ID, drop unknown), non-text notice, `/new` command, message splitting. Test: `telegram_test.go` "stranger ignored", "disabled identity ignored", "agent receives internal user ID only", "voice message notice", "split 9000 chars", plus `agent_test.go` "/new clears only the sender's history".
+- [x] 5.1 Long-poll client with offset advanced only after handling, backoff on failure. Test: `telegram_test.go` against fake Bot API server, "update re-delivered after crash", "backoff on 502".
+- [x] 5.2 Identity resolution (Telegram ID to user ID, drop unknown), non-text notice, `/new` command, message splitting. Test: `telegram_test.go` "stranger ignored", "disabled identity ignored", "agent receives internal user ID only", "voice message notice", "split 9000 chars", plus `agent_test.go` "/new clears only the sender's history".
 
 ## 6. Observability and wrap-up
 

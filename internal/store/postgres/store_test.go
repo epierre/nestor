@@ -796,3 +796,55 @@ func TestCostPerUserFromCallLog(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+func TestResolveIdentity(t *testing.T) {
+	ctx := context.Background()
+	pool := migrated(t)
+	st := New(pool)
+	syncAllowlist(t, st, "telegram", ana, ben)
+	want := identities(t, pool, "telegram")
+	syncAllowlist(t, st, "signal", ana)
+
+	got, err := st.ResolveIdentity(ctx, "telegram", "100")
+	if err != nil {
+		t.Fatalf("ResolveIdentity: %v", err)
+	}
+	if int64(got) != want["100"].UserID {
+		t.Errorf("got user %d, want %d", got, want["100"].UserID)
+	}
+	other, err := st.ResolveIdentity(ctx, "telegram", "200")
+	if err != nil {
+		t.Fatalf("ResolveIdentity: %v", err)
+	}
+	if other == got {
+		t.Errorf("both identities resolve to user %d", got)
+	}
+	if _, err := st.ResolveIdentity(ctx, "telegram", "999"); !errors.Is(err, store.ErrIdentityNotFound) {
+		t.Errorf("unknown identity: got error %v", err)
+	}
+}
+
+func TestResolveIdentityRefusesDisabled(t *testing.T) {
+	ctx := context.Background()
+	t.Run("removed from the allowlist", func(t *testing.T) {
+		st := New(migrated(t))
+		syncAllowlist(t, st, "telegram", ana, ben)
+		syncAllowlist(t, st, "telegram", ana)
+
+		if _, err := st.ResolveIdentity(ctx, "telegram", "200"); !errors.Is(err, store.ErrIdentityNotFound) {
+			t.Errorf("got error %v, want ErrIdentityNotFound", err)
+		}
+	})
+	t.Run("disabled user", func(t *testing.T) {
+		pool := migrated(t)
+		st := New(pool)
+		syncAllowlist(t, st, "telegram", ana)
+		if _, err := pool.Exec(ctx, `UPDATE users SET disabled_at = now()`); err != nil {
+			t.Fatalf("disable user: %v", err)
+		}
+
+		if _, err := st.ResolveIdentity(ctx, "telegram", "100"); !errors.Is(err, store.ErrIdentityNotFound) {
+			t.Errorf("got error %v, want ErrIdentityNotFound", err)
+		}
+	})
+}

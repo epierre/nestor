@@ -10,11 +10,17 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/epierre/nestor/internal/agent"
+	"github.com/epierre/nestor/internal/channel/telegram"
 	"github.com/epierre/nestor/internal/config"
+	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store/postgres"
 )
 
-const platformTelegram = "telegram"
+const (
+	platformTelegram = "telegram"
+	systemPrompt     = "You are Nestor, a helpful personal assistant. Be concise."
+)
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
@@ -42,10 +48,23 @@ func run() error {
 		return err
 	}
 
+	client := model.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey)
+	assistant := agent.New(client, st, agentOptions(cfg))
+	bot := telegram.New(cfg.TelegramBotToken, st)
+
 	slog.Info("nestor started", "model", cfg.LLMModel, "allowed_users", len(cfg.AllowedTelegramUsers))
-	<-ctx.Done()
+	err = bot.Run(ctx, assistant)
 	slog.Info("nestor stopping")
-	return nil
+	return err
+}
+
+func agentOptions(cfg config.Config) agent.Options {
+	return agent.Options{
+		Model:         cfg.LLMModel,
+		SystemPrompt:  systemPrompt,
+		HistoryLimit:  cfg.HistoryLimit,
+		MaxIterations: cfg.MaxLoopIterations,
+	}
 }
 
 func allowedIdentities(users []config.TelegramUser) []postgres.AllowedIdentity {

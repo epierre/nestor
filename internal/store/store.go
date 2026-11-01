@@ -17,6 +17,9 @@ var (
 	// ErrConversationNotFound is returned when a conversation does not exist or belongs to
 	// another user. The two are not told apart.
 	ErrConversationNotFound = errors.New("conversation not found")
+	// ErrIdentityNotFound is returned when a platform identity is unknown or disabled. The two
+	// are not told apart.
+	ErrIdentityNotFound = errors.New("identity not found")
 )
 
 // Conversation is a sequence of messages owned by one user.

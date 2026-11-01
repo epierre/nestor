@@ -568,3 +568,47 @@ func TestUnrecordableCallReturnsError(t *testing.T) {
 		t.Errorf("got error %v, want %v", err, errStoreDown)
 	}
 }
+
+func TestNewClearsOnlyTheSendersHistory(t *testing.T) {
+	client := numberedReplies()
+	a := newAgent(client)
+	send(t, a, 1, "first of A")
+	send(t, a, 2, "first of B")
+
+	reply := send(t, a, 1, "/new")
+
+	if reply != noticeNewConversation {
+		t.Errorf("got reply %q, want %q", reply, noticeNewConversation)
+	}
+	if got := len(client.Requests()); got != 2 {
+		t.Errorf("made %d model calls, want 2: /new calls no model", got)
+	}
+
+	send(t, a, 1, "what did I just say?")
+	want := []model.Message{
+		text(model.RoleSystem, "be helpful"),
+		text(model.RoleUser, "what did I just say?"),
+	}
+	if got := lastRequest(t, client).Messages; !reflect.DeepEqual(got, want) {
+		t.Errorf("user A: got %+v, want %+v", got, want)
+	}
+
+	send(t, a, 2, "and now?")
+	want = []model.Message{
+		text(model.RoleSystem, "be helpful"),
+		text(model.RoleUser, "first of B"),
+		text(model.RoleAssistant, "reply 2"),
+		text(model.RoleUser, "and now?"),
+	}
+	if got := lastRequest(t, client).Messages; !reflect.DeepEqual(got, want) {
+		t.Errorf("user B: got %+v, want %+v", got, want)
+	}
+}
+
+func TestNewOnlyMatchesTheWholeCommand(t *testing.T) {
+	client := numberedReplies()
+
+	if got := send(t, newAgent(client), 1, "/newsletter"); got != "reply 1" {
+		t.Errorf("got reply %q, want the model's", got)
+	}
+}
