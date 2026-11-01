@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	neturl "net/url"
 	"reflect"
@@ -14,12 +15,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/model"
+	"github.com/epierre/nestor/internal/store"
 )
 
 const (
-	foreignKeyViolation = "23503"
-	uniqueViolation     = "23505"
-	checkViolation      = "23514"
+	uniqueViolation = "23505"
+	checkViolation  = "23514"
 )
 
 var appTables = []string{
@@ -458,5 +462,337 @@ func TestOpenMigrates(t *testing.T) {
 
 	if got := tables(t, pool); !reflect.DeepEqual(got, appTables) {
 		t.Errorf("tables %v, want %v", got, appTables)
+	}
+}
+
+// twoScoped returns a store, two users and a context for each.
+func twoScoped(t *testing.T) (st *Store, pool *pgxpool.Pool, a, b identity.UserID, ctxA, ctxB context.Context) {
+	t.Helper()
+	pool = migrated(t)
+	first, second := twoUsers(t, pool)
+	a, b = identity.UserID(first), identity.UserID(second)
+	return New(pool), pool, a, b,
+		identity.WithUser(context.Background(), a), identity.WithUser(context.Background(), b)
+}
+
+func active(t *testing.T, st *Store, ctx context.Context, user identity.UserID) store.Conversation {
+	t.Helper()
+	c, err := st.ActiveConversation(ctx, user)
+	if err != nil {
+		t.Fatalf("ActiveConversation: %v", err)
+	}
+	return c
+}
+
+func appendText(t *testing.T, st *Store, ctx context.Context, user identity.UserID, conversation int64, texts ...string) {
+	t.Helper()
+	for _, text := range texts {
+		if _, err := st.AppendMessage(ctx, user, conversation, model.RoleUser, text); err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+}
+
+func contents(messages []store.Message) []string {
+	texts := make([]string, 0, len(messages))
+	for _, m := range messages {
+		texts = append(texts, m.Content)
+	}
+	return texts
+}
+
+func TestActiveConversationPerUser(t *testing.T) {
+	st, _, a, b, ctxA, ctxB := twoScoped(t)
+
+	first := active(t, st, ctxA, a)
+	if first.UserID != a || first.ID == 0 || first.StartedAt.IsZero() || first.EndedAt != nil {
+		t.Errorf("got conversation %+v", first)
+	}
+	if again := active(t, st, ctxA, a); again.ID != first.ID {
+		t.Errorf("second call returned conversation %d, want %d", again.ID, first.ID)
+	}
+	if other := active(t, st, ctxB, b); other.ID == first.ID || other.UserID != b {
+		t.Errorf("user B got conversation %+v, user A has %+v", other, first)
+	}
+}
+
+func TestActiveConversationConcurrently(t *testing.T) {
+	st, _, a, _, ctxA, _ := twoScoped(t)
+
+	var wg sync.WaitGroup
+	ids := make([]int64, 8)
+	errs := make([]error, len(ids))
+	for i := range ids {
+		wg.Go(func() {
+			c, err := st.ActiveConversation(ctxA, a)
+			ids[i], errs[i] = c.ID, err
+		})
+	}
+	wg.Wait()
+
+	if err := errors.Join(errs...); err != nil {
+		t.Fatalf("ActiveConversation: %v", err)
+	}
+	for _, id := range ids {
+		if id != ids[0] {
+			t.Fatalf("got conversations %v, want one", ids)
+		}
+	}
+}
+
+func TestCloseConversationOnlyClosesOwn(t *testing.T) {
+	st, _, a, b, ctxA, ctxB := twoScoped(t)
+	first := active(t, st, ctxA, a)
+	other := active(t, st, ctxB, b)
+
+	if err := st.CloseConversation(ctxA, a); err != nil {
+		t.Fatalf("CloseConversation: %v", err)
+	}
+
+	if got := active(t, st, ctxA, a); got.ID == first.ID {
+		t.Errorf("user A still has conversation %d open", first.ID)
+	}
+	if got := active(t, st, ctxB, b); got.ID != other.ID {
+		t.Errorf("user B moved from conversation %d to %d", other.ID, got.ID)
+	}
+}
+
+func TestCloseConversationWithNoneOpen(t *testing.T) {
+	st, _, a, _, ctxA, _ := twoScoped(t)
+
+	if err := st.CloseConversation(ctxA, a); err != nil {
+		t.Errorf("CloseConversation: %v", err)
+	}
+}
+
+func TestAppendMessage(t *testing.T) {
+	st, _, a, _, ctxA, _ := twoScoped(t)
+	conversation := active(t, st, ctxA, a)
+
+	got, err := st.AppendMessage(ctxA, a, conversation.ID, model.RoleAssistant, "hello")
+	if err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	if got.ID == 0 || got.UserID != a || got.ConversationID != conversation.ID ||
+		got.Role != model.RoleAssistant || got.Content != "hello" || got.CreatedAt.IsZero() {
+		t.Errorf("got message %+v", got)
+	}
+}
+
+func TestAppendMessageToOtherUsersConversationRejected(t *testing.T) {
+	st, _, a, b, ctxA, ctxB := twoScoped(t)
+	conversation := active(t, st, ctxA, a)
+
+	_, err := st.AppendMessage(ctxB, b, conversation.ID, model.RoleUser, "hello")
+
+	if !errors.Is(err, store.ErrConversationNotFound) {
+		t.Errorf("got error %v, want ErrConversationNotFound", err)
+	}
+}
+
+func TestRecentMessages(t *testing.T) {
+	tests := []struct {
+		name  string
+		limit int
+		want  []string
+	}{
+		{"within limit, oldest first", 10, []string{"one", "two", "three"}},
+		{"at limit", 3, []string{"one", "two", "three"}},
+		{"beyond limit keeps the newest", 2, []string{"two", "three"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, _, a, _, ctxA, _ := twoScoped(t)
+			conversation := active(t, st, ctxA, a)
+			appendText(t, st, ctxA, a, conversation.ID, "one", "two", "three")
+
+			got, err := st.RecentMessages(ctxA, a, conversation.ID, tt.limit)
+			if err != nil {
+				t.Fatalf("RecentMessages: %v", err)
+			}
+			if !reflect.DeepEqual(contents(got), tt.want) {
+				t.Errorf("got %q, want %q", contents(got), tt.want)
+			}
+		})
+	}
+}
+
+func TestRecentMessagesNeverShowOtherUsersData(t *testing.T) {
+	st, _, a, b, ctxA, ctxB := twoScoped(t)
+	conversationA := active(t, st, ctxA, a)
+	conversationB := active(t, st, ctxB, b)
+	appendText(t, st, ctxA, a, conversationA.ID, "my code word is falcon")
+	appendText(t, st, ctxB, b, conversationB.ID, "what is my code word?")
+
+	own, err := st.RecentMessages(ctxB, b, conversationB.ID, 10)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if want := []string{"what is my code word?"}; !reflect.DeepEqual(contents(own), want) {
+		t.Errorf("got %q, want %q", contents(own), want)
+	}
+
+	other, err := st.RecentMessages(ctxB, b, conversationA.ID, 10)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(other) != 0 {
+		t.Errorf("user B read %q from user A's conversation", contents(other))
+	}
+}
+
+func TestRecordModelCall(t *testing.T) {
+	cost := 0.00042
+	st, pool, a, _, ctxA, _ := twoScoped(t)
+	conversation := active(t, st, ctxA, a)
+	started := time.Now().Truncate(time.Microsecond)
+
+	err := st.RecordModelCall(ctxA, a, store.ModelCall{
+		ConversationID:   conversation.ID,
+		Model:            "cheap",
+		StartedAt:        started,
+		Latency:          1500 * time.Millisecond,
+		PromptTokens:     12,
+		CompletionTokens: 3,
+		CostUSD:          &cost,
+		Status:           "ok",
+		RequestJSON:      json.RawMessage(`{"model": "cheap"}`),
+		ResponseJSON:     json.RawMessage(`{"choices": []}`),
+	})
+	if err != nil {
+		t.Fatalf("RecordModelCall: %v", err)
+	}
+
+	var got struct {
+		user               int64
+		model              string
+		started            time.Time
+		latency            int64
+		prompt, completion int
+		cost               float64
+		status, errText    string
+		request, response  string
+	}
+	err = pool.QueryRow(context.Background(), `
+		SELECT user_id, model, started_at, latency_ms, prompt_tokens, completion_tokens, cost_usd,
+			status, error, request_json::text, response_json::text
+		FROM model_calls WHERE conversation_id = $1`, conversation.ID).Scan(
+		&got.user, &got.model, &got.started, &got.latency, &got.prompt, &got.completion, &got.cost,
+		&got.status, &got.errText, &got.request, &got.response)
+	if err != nil {
+		t.Fatalf("read call: %v", err)
+	}
+	if got.user != int64(a) || got.model != "cheap" || !got.started.Equal(started) || got.latency != 1500 ||
+		got.prompt != 12 || got.completion != 3 || got.cost != cost || got.status != "ok" || got.errText != "" {
+		t.Errorf("got %+v", got)
+	}
+	if got.request != `{"model": "cheap"}` || got.response != `{"choices": []}` {
+		t.Errorf("got bodies %s and %s", got.request, got.response)
+	}
+}
+
+func TestRecordFailedModelCallKeepsNulls(t *testing.T) {
+	st, pool, a, _, ctxA, _ := twoScoped(t)
+	conversation := active(t, st, ctxA, a)
+
+	err := st.RecordModelCall(ctxA, a, store.ModelCall{
+		ConversationID: conversation.ID,
+		Model:          "cheap",
+		StartedAt:      time.Now(),
+		Latency:        30 * time.Second,
+		Status:         "error",
+		Error:          "context deadline exceeded",
+		RequestJSON:    json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("RecordModelCall: %v", err)
+	}
+
+	const nulls = `SELECT count(*) FROM model_calls WHERE cost_usd IS NULL AND response_json IS NULL AND error <> ''`
+	if got := count(t, pool, nulls); got != 1 {
+		t.Errorf("got %d rows with null cost and response, want 1", got)
+	}
+}
+
+func TestRecordModelCallRoundsSubMillisecondLatencyUp(t *testing.T) {
+	st, pool, a, _, ctxA, _ := twoScoped(t)
+	conversation := active(t, st, ctxA, a)
+
+	err := st.RecordModelCall(ctxA, a, store.ModelCall{
+		ConversationID: conversation.ID,
+		Model:          "cheap",
+		StartedAt:      time.Now(),
+		Latency:        200 * time.Microsecond,
+		Status:         "ok",
+		RequestJSON:    json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("RecordModelCall: %v", err)
+	}
+
+	if got := count(t, pool, `SELECT latency_ms FROM model_calls`); got != 1 {
+		t.Errorf("got latency %d ms, want 1", got)
+	}
+}
+
+func TestRecordModelCallOnOtherUsersConversationRejected(t *testing.T) {
+	st, _, a, b, ctxA, ctxB := twoScoped(t)
+	conversation := active(t, st, ctxA, a)
+
+	err := st.RecordModelCall(ctxB, b, store.ModelCall{
+		ConversationID: conversation.ID,
+		Model:          "cheap",
+		StartedAt:      time.Now(),
+		Status:         "ok",
+		RequestJSON:    json.RawMessage(`{}`),
+	})
+
+	if !errors.Is(err, store.ErrConversationNotFound) {
+		t.Errorf("got error %v, want ErrConversationNotFound", err)
+	}
+}
+
+func TestCostPerUserFromCallLog(t *testing.T) {
+	st, pool, a, b, ctxA, ctxB := twoScoped(t)
+	record := func(ctx context.Context, user identity.UserID, conversation int64, cost *float64) {
+		t.Helper()
+		err := st.RecordModelCall(ctx, user, store.ModelCall{
+			ConversationID: conversation,
+			Model:          "cheap",
+			StartedAt:      time.Now(),
+			CostUSD:        cost,
+			Status:         "ok",
+			RequestJSON:    json.RawMessage(`{}`),
+		})
+		if err != nil {
+			t.Fatalf("RecordModelCall: %v", err)
+		}
+	}
+	price := func(v float64) *float64 { return &v }
+	conversationA := active(t, st, ctxA, a).ID
+	conversationB := active(t, st, ctxB, b).ID
+	record(ctxA, a, conversationA, price(0.25))
+	record(ctxA, a, conversationA, price(0.5))
+	record(ctxA, a, conversationA, nil)
+	record(ctxB, b, conversationB, price(2))
+
+	rows, err := pool.Query(context.Background(),
+		`SELECT user_id, sum(cost_usd)::float8 FROM model_calls GROUP BY user_id`)
+	if err != nil {
+		t.Fatalf("sum cost: %v", err)
+	}
+	got := make(map[identity.UserID]float64)
+	var user int64
+	var total float64
+	if _, err := pgx.ForEachRow(rows, []any{&user, &total}, func() error {
+		got[identity.UserID(user)] = total
+		return nil
+	}); err != nil {
+		t.Fatalf("sum cost: %v", err)
+	}
+
+	if want := map[identity.UserID]float64{a: 0.75, b: 2}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }

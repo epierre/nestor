@@ -6,8 +6,17 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/model"
+	"github.com/epierre/nestor/internal/store"
 )
+
+const foreignKeyViolation = "23503"
+
+var _ store.Store = (*Store)(nil)
 
 // Store is the PostgreSQL store.
 type Store struct {
@@ -107,4 +116,123 @@ func insertIdentity(ctx context.Context, tx pgx.Tx, platform string, identity Al
 		return fmt.Errorf("insert identity: %w", err)
 	}
 	return nil
+}
+
+// ActiveConversation implements store.Store. Concurrent calls for one user get the same
+// conversation: the insert yields to the unique index on open conversations.
+func (s *Store) ActiveConversation(ctx context.Context, user identity.UserID) (store.Conversation, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return store.Conversation{}, err
+	}
+	c, err := s.openConversation(ctx, user)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return c, err
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO conversations (user_id) VALUES ($1)
+		ON CONFLICT (user_id) WHERE ended_at IS NULL DO NOTHING`, user)
+	if err != nil {
+		return store.Conversation{}, fmt.Errorf("create conversation: %w", err)
+	}
+	return s.openConversation(ctx, user)
+}
+
+func (s *Store) openConversation(ctx context.Context, user identity.UserID) (store.Conversation, error) {
+	c := store.Conversation{UserID: user}
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, started_at, ended_at FROM conversations
+		WHERE user_id = $1 AND ended_at IS NULL`, user).Scan(&c.ID, &c.StartedAt, &c.EndedAt)
+	if err != nil {
+		return store.Conversation{}, fmt.Errorf("find open conversation: %w", err)
+	}
+	return c, nil
+}
+
+// CloseConversation implements store.Store.
+func (s *Store) CloseConversation(ctx context.Context, user identity.UserID) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE conversations SET ended_at = now()
+		WHERE user_id = $1 AND ended_at IS NULL`, user)
+	if err != nil {
+		return fmt.Errorf("close conversation: %w", err)
+	}
+	return nil
+}
+
+// AppendMessage implements store.Store.
+func (s *Store) AppendMessage(ctx context.Context, user identity.UserID, conversationID int64, role model.Role, content string) (store.Message, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return store.Message{}, err
+	}
+	m := store.Message{UserID: user, ConversationID: conversationID, Role: role, Content: content}
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO messages (user_id, conversation_id, role, content)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, created_at`,
+		user, conversationID, role, content).Scan(&m.ID, &m.CreatedAt)
+	if err != nil {
+		return store.Message{}, fmt.Errorf("append message: %w", conversationError(err))
+	}
+	return m, nil
+}
+
+// RecentMessages implements store.Store.
+func (s *Store) RecentMessages(ctx context.Context, user identity.UserID, conversationID int64, limit int) ([]store.Message, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, user_id, conversation_id, role, content, created_at FROM (
+			SELECT * FROM messages
+			WHERE user_id = $1 AND conversation_id = $2
+			ORDER BY id DESC LIMIT $3
+		) AS recent ORDER BY id`,
+		user, conversationID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query messages: %w", err)
+	}
+	messages, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (store.Message, error) {
+		var m store.Message
+		err := row.Scan(&m.ID, &m.UserID, &m.ConversationID, &m.Role, &m.Content, &m.CreatedAt)
+		return m, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read messages: %w", err)
+	}
+	return messages, nil
+}
+
+// RecordModelCall implements store.Store. Latency is stored in milliseconds, rounded up from
+// below one so that a call that took time never reads as zero.
+func (s *Store) RecordModelCall(ctx context.Context, user identity.UserID, call store.ModelCall) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	latency := call.Latency.Milliseconds()
+	if latency == 0 && call.Latency > 0 {
+		latency = 1
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO model_calls (user_id, conversation_id, model, started_at, latency_ms,
+			prompt_tokens, completion_tokens, cost_usd, status, error, request_json, response_json)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		user, call.ConversationID, call.Model, call.StartedAt, latency,
+		call.PromptTokens, call.CompletionTokens, call.CostUSD, call.Status, call.Error,
+		call.RequestJSON, call.ResponseJSON)
+	if err != nil {
+		return fmt.Errorf("record model call: %w", conversationError(err))
+	}
+	return nil
+}
+
+// conversationError turns the composite foreign key's refusal into ErrConversationNotFound.
+func conversationError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
+		return store.ErrConversationNotFound
+	}
+	return err
 }
