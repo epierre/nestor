@@ -4,9 +4,19 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/epierre/nestor/internal/agent"
 	"github.com/epierre/nestor/internal/config"
 	"github.com/epierre/nestor/internal/store/postgres"
 )
+
+func TestAgentOptionsComeFromConfig(t *testing.T) {
+	got := agentOptions(config.Config{LLMModel: "strong", HistoryLimit: 12, MaxLoopIterations: 3})
+
+	want := agent.Options{Model: "strong", SystemPrompt: systemPrompt, HistoryLimit: 12, MaxIterations: 3}
+	if got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
 
 func TestAllowedIdentities(t *testing.T) {
 	got := allowedIdentities([]config.TelegramUser{

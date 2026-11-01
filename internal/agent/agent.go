@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
@@ -15,6 +16,9 @@ import (
 const (
 	noticeModelFailure = "I couldn't reach the model, try again shortly."
 	noticeLoopLimit    = "I couldn't finish that request, try asking in a different way."
+
+	commandNew            = "/new"
+	noticeNewConversation = "Started a new conversation."
 
 	toolsUnavailable = "error: no tools are available"
 )
@@ -42,11 +46,18 @@ func New(client model.ModelClient, st store.Store, opts Options) *Agent {
 // HandleMessage stores text in the active conversation of the user carried by ctx, and returns and
 // stores the model's reply. A failed or runaway model call yields a notice for the user, which is
 // not stored so that the model never reads it as its own words. An error means the message could
-// not be handled at all, such as when the store is down.
+// not be handled at all, such as when the store is down. The /new command closes the user's
+// conversation instead.
 func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) {
 	user, err := identity.UserFrom(ctx)
 	if err != nil {
 		return "", fmt.Errorf("handle message: %w", err)
+	}
+	if strings.TrimSpace(text) == commandNew {
+		if err := a.store.CloseConversation(ctx, user); err != nil {
+			return "", fmt.Errorf("close conversation: %w", err)
+		}
+		return noticeNewConversation, nil
 	}
 	conversation, err := a.store.ActiveConversation(ctx, user)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+	"unicode/utf16"
 
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
@@ -30,7 +31,10 @@ const (
 	defaultMinBackoff = time.Second
 	defaultMaxBackoff = time.Minute
 
-	noticeFailure = "Something went wrong, try again shortly."
+	maxMessageLength = 4096 // Telegram counts UTF-16 code units
+
+	noticeFailure  = "Something went wrong, try again shortly."
+	noticeTextOnly = "I can only read text messages for now."
 )
 
 var _ channel.Channel = (*Channel)(nil)
@@ -123,10 +127,13 @@ func (c *Channel) handle(ctx context.Context, h channel.Handler, u update) error
 		return fmt.Errorf("resolve sender: %w", err)
 	}
 
-	reply, err := h.HandleMessage(identity.WithUser(ctx, user), m.Text)
-	if err != nil {
-		slog.ErrorContext(ctx, "message handling failed", "error", err)
-		reply = noticeFailure
+	reply := noticeTextOnly
+	if m.Text != "" {
+		reply, err = h.HandleMessage(identity.WithUser(ctx, user), m.Text)
+		if err != nil {
+			slog.ErrorContext(ctx, "message handling failed", "error", err)
+			reply = noticeFailure
+		}
 	}
 	err = c.Send(ctx, m.Chat.ID, reply)
 	if isPermanent(err) {
@@ -136,8 +143,36 @@ func (c *Channel) handle(ctx context.Context, h channel.Handler, u update) error
 	return err
 }
 
-// Send delivers text to the chat, retrying transient failures until ctx is cancelled.
+// Send delivers text to the chat in consecutive messages within Telegram's size limit, retrying
+// transient failures until ctx is cancelled. Empty text sends nothing, as Telegram refuses it.
 func (c *Channel) Send(ctx context.Context, chatID int64, text string) error {
+	for _, part := range split(text) {
+		if err := c.sendPart(ctx, chatID, part); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// split cuts text into parts within maxMessageLength, never inside a character.
+func split(text string) []string {
+	var parts []string
+	start, length := 0, 0
+	for i, r := range text {
+		units := utf16.RuneLen(r)
+		if length+units > maxMessageLength {
+			parts = append(parts, text[start:i])
+			start, length = i, 0
+		}
+		length += units
+	}
+	if start < len(text) {
+		parts = append(parts, text[start:])
+	}
+	return parts
+}
+
+func (c *Channel) sendPart(ctx context.Context, chatID int64, text string) error {
 	payload := sendMessageRequest{ChatID: chatID, Text: text}
 	for failures := 1; ; failures++ {
 		sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)

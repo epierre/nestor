@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
@@ -376,11 +378,7 @@ func TestRunStopsWhenContextIsCancelled(t *testing.T) {
 }
 
 func TestErrorsNeverContainTheToken(t *testing.T) {
-	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-
+	logs := captureLogs(t)
 	api := newBotAPI(t)
 	c := newChannel(api, knownSender())
 	api.Close() // every request now fails with a transport error, which quotes the URL
@@ -403,5 +401,210 @@ func TestErrorsNeverContainTheToken(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), testToken) {
 		t.Errorf("logs contain the token: %s", logs.String())
+	}
+}
+
+func TestDecodesBotAPIMessages(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"text", `{"update_id": 9, "message": {"message_id": 1, "date": 1793000000,
+			"from": {"id": 100, "is_bot": false, "first_name": "Ana"},
+			"chat": {"id": 500, "type": "private"}, "text": "hello"}}`, "hello"},
+		{"voice", `{"update_id": 9, "message": {"message_id": 1, "date": 1793000000,
+			"from": {"id": 100, "is_bot": false, "first_name": "Ana"},
+			"chat": {"id": 500, "type": "private"},
+			"voice": {"file_id": "f", "file_unique_id": "u", "duration": 2}}}`, ""},
+		{"photo with caption", `{"update_id": 9, "message": {"message_id": 1, "date": 1793000000,
+			"from": {"id": 100, "is_bot": false, "first_name": "Ana"},
+			"chat": {"id": 500, "type": "private"}, "caption": "look",
+			"photo": [{"file_id": "f", "file_unique_id": "u", "width": 1, "height": 1}]}}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var u update
+			if err := json.Unmarshal([]byte(tt.body), &u); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if u.UpdateID != 9 || u.Message.From.ID != 100 || u.Message.Chat.ID != 500 || u.Message.Text != tt.want {
+				t.Errorf("got %+v with message %+v", u, u.Message)
+			}
+		})
+	}
+}
+
+// handled records what a handler received.
+type handled struct {
+	mu    sync.Mutex
+	texts []string
+	users []identity.UserID
+}
+
+func (h *handled) HandleMessage(ctx context.Context, text string) (string, error) {
+	user, err := identity.UserFrom(ctx)
+	if err != nil {
+		return "", err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.texts = append(h.texts, text)
+	h.users = append(h.users, user)
+	return "done", nil
+}
+
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
+}
+
+func TestStrangerIgnored(t *testing.T) {
+	logs := captureLogs(t)
+	const stranger = 666
+	api := newBotAPI(t, textUpdate(1, stranger, "hello"))
+	h := &handled{}
+
+	runUntil(t, newChannel(api, knownSender()), h, func() bool { return api.confirmed(1) })
+
+	if len(h.texts) != 0 {
+		t.Errorf("handler received %q", h.texts)
+	}
+	if got := api.sentTexts(); len(got) != 0 {
+		t.Errorf("sent %q", got)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "telegram_id=666") {
+		t.Errorf("logs %q show no warning with the sender ID", logs.String())
+	}
+}
+
+func TestDisabledIdentityIgnored(t *testing.T) {
+	st := knownSender()
+	st.DisableIdentity(platform, strconv.Itoa(senderID))
+	api := newBotAPI(t, textUpdate(1, senderID, "hello"))
+	h := &handled{}
+
+	runUntil(t, newChannel(api, st), h, func() bool { return api.confirmed(1) })
+
+	if len(h.texts) != 0 {
+		t.Errorf("handler received %q", h.texts)
+	}
+	if got := api.sentTexts(); len(got) != 0 {
+		t.Errorf("sent %q", got)
+	}
+}
+
+func TestAgentReceivesInternalUserIDOnly(t *testing.T) {
+	api := newBotAPI(t, textUpdate(1, senderID, "hello"))
+	h := &handled{}
+
+	runUntil(t, newChannel(api, knownSender()), h, func() bool { return api.confirmed(1) })
+
+	if len(h.users) != 1 || h.users[0] != internalID {
+		t.Errorf("handler received users %v, want %d", h.users, internalID)
+	}
+	if len(h.texts) != 1 || h.texts[0] != "hello" {
+		t.Errorf("handler received %q, want the bare text", h.texts)
+	}
+}
+
+func TestVoiceMessageNotice(t *testing.T) {
+	api := newBotAPI(t, textUpdate(1, senderID, ""))
+	h := &handled{}
+
+	runUntil(t, newChannel(api, knownSender()), h, func() bool { return api.confirmed(1) })
+
+	if len(h.texts) != 0 {
+		t.Errorf("handler received %q", h.texts)
+	}
+	if got := api.sentTexts(); len(got) != 1 || got[0] != noticeTextOnly {
+		t.Errorf("sent %q, want the text-only notice", got)
+	}
+}
+
+func TestStrangerSendingVoiceGetsNoNotice(t *testing.T) {
+	api := newBotAPI(t, textUpdate(1, 666, ""))
+
+	runUntil(t, newChannel(api, knownSender()), &handled{}, func() bool { return api.confirmed(1) })
+
+	if got := api.sentTexts(); len(got) != 0 {
+		t.Errorf("sent %q to a stranger", got)
+	}
+}
+
+func utf16Length(s string) int {
+	return len(utf16.Encode([]rune(s)))
+}
+
+func TestSplit9000Chars(t *testing.T) {
+	reply := strings.Repeat("a", 9000)
+	api := newBotAPI(t, textUpdate(1, senderID, "hello"))
+	handler := handlerFunc(func(context.Context, string) (string, error) { return reply, nil })
+
+	runUntil(t, newChannel(api, knownSender()), handler, func() bool { return api.confirmed(1) })
+
+	sent := api.sentTexts()
+	if len(sent) != 3 {
+		t.Errorf("sent %d messages, want 3", len(sent))
+	}
+	for _, part := range sent {
+		if utf16Length(part) > maxMessageLength {
+			t.Errorf("part of %d units exceeds the limit", utf16Length(part))
+		}
+	}
+	if strings.Join(sent, "") != reply {
+		t.Error("parts do not concatenate to the reply")
+	}
+}
+
+func TestSplit(t *testing.T) {
+	emoji := "\U0001F600" // two UTF-16 units
+	tests := []struct {
+		name  string
+		text  string
+		parts int
+	}{
+		{"empty", "", 0},
+		{"short", "hello", 1},
+		{"at the limit", strings.Repeat("a", maxMessageLength), 1},
+		{"one over", strings.Repeat("a", maxMessageLength+1), 2},
+		{"multi-byte", strings.Repeat("é", maxMessageLength+1), 2},
+		{"surrogate pair across the limit", strings.Repeat("a", maxMessageLength-1) + emoji, 2},
+		{"all surrogate pairs", strings.Repeat(emoji, maxMessageLength), 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parts := split(tt.text)
+
+			if len(parts) != tt.parts {
+				t.Errorf("got %d parts, want %d", len(parts), tt.parts)
+			}
+			if got := strings.Join(parts, ""); got != tt.text {
+				t.Error("parts do not concatenate to the text")
+			}
+			for _, part := range parts {
+				if !utf8.ValidString(part) {
+					t.Error("a character was cut in two")
+				}
+				if utf16Length(part) > maxMessageLength {
+					t.Errorf("part of %d units exceeds the limit", utf16Length(part))
+				}
+			}
+		})
+	}
+}
+
+func TestEmptyReplySendsNothing(t *testing.T) {
+	api := newBotAPI(t, textUpdate(1, senderID, "hello"))
+	handler := handlerFunc(func(context.Context, string) (string, error) { return "", nil })
+
+	runUntil(t, newChannel(api, knownSender()), handler, func() bool { return api.confirmed(1) })
+
+	if got := api.sentTexts(); len(got) != 0 {
+		t.Errorf("sent %q", got)
 	}
 }

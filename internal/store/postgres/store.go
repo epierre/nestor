@@ -59,7 +59,7 @@ type AllowedIdentity struct {
 
 // SyncAllowlist makes the platform's identities match allowed: new entries get a user, existing
 // ones are enabled and renamed, and identities not listed are disabled with their data kept. It
-// runs at startup on behalf of no user, so it is the one method that takes no user ID.
+// runs at startup on behalf of no user, so it takes no user ID.
 func (s *Store) SyncAllowlist(ctx context.Context, platform string, allowed []AllowedIdentity) error {
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		externalIDs := make([]string, 0, len(allowed))
@@ -116,6 +116,25 @@ func insertIdentity(ctx context.Context, tx pgx.Tx, platform string, identity Al
 		return fmt.Errorf("insert identity: %w", err)
 	}
 	return nil
+}
+
+// ResolveIdentity returns the user behind an enabled platform identity, or
+// store.ErrIdentityNotFound. Like SyncAllowlist it runs before any user is known: this lookup is
+// what establishes the user for a request.
+func (s *Store) ResolveIdentity(ctx context.Context, platform, externalID string) (identity.UserID, error) {
+	var user identity.UserID
+	err := s.pool.QueryRow(ctx, `
+		SELECT i.user_id FROM user_identities i JOIN users u ON u.id = i.user_id
+		WHERE i.platform = $1 AND i.external_id = $2
+			AND i.disabled_at IS NULL AND u.disabled_at IS NULL`,
+		platform, externalID).Scan(&user)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, store.ErrIdentityNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("resolve identity: %w", err)
+	}
+	return user, nil
 }
 
 // ActiveConversation implements store.Store. Concurrent calls for one user get the same
