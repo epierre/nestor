@@ -11,8 +11,13 @@ import (
 	"github.com/epierre/nestor/internal/model"
 )
 
-// ErrUserMismatch is returned when a store call names a different user than its context.
-var ErrUserMismatch = errors.New("user ID does not match context")
+var (
+	// ErrUserMismatch is returned when a store call names a different user than its context.
+	ErrUserMismatch = errors.New("user ID does not match context")
+	// ErrConversationNotFound is returned when a conversation does not exist or belongs to
+	// another user. The two are not told apart.
+	ErrConversationNotFound = errors.New("conversation not found")
+)
 
 // Conversation is a sequence of messages owned by one user.
 type Conversation struct {

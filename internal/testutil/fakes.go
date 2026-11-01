@@ -3,7 +3,6 @@ package testutil
 
 import (
 	"context"
-	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -159,7 +158,7 @@ func (s *FakeStore) AppendMessage(ctx context.Context, user identity.UserID, con
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.owns(user, conversationID) {
-		return store.Message{}, errors.New("conversation not found")
+		return store.Message{}, store.ErrConversationNotFound
 	}
 	m := store.Message{
 		ID:             s.id(),
@@ -196,6 +195,9 @@ func (s *FakeStore) RecordModelCall(ctx context.Context, user identity.UserID, c
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.owns(user, call.ConversationID) {
+		return store.ErrConversationNotFound
+	}
 	call.ID = s.id()
 	call.UserID = user
 	s.modelCalls = append(s.modelCalls, call)
