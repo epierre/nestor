@@ -11,7 +11,7 @@
 
 ## 3. Persistence
 
-- [ ] 3.1 First migration: users, user_identities, conversations, messages, model_calls, with user_id on every user-data table and composite FKs keeping child rows in their parent's user. Test: integration `store_test.go` "migrate up and down", "message with mismatched user and conversation rejected".
+- [x] 3.1 First migration: users, user_identities, conversations, messages, model_calls, with user_id on every user-data table and composite FKs keeping child rows in their parent's user. Test: integration `store_test.go` "migrate up and down", "message with mismatched user and conversation rejected".
 - [ ] 3.2 Allowlist sync on startup: upsert users and identities, disable removed identities. Test: integration `store_test.go` "allowlist upsert idempotent", "removed identity disabled, data kept".
 - [ ] 3.3 Store methods, all taking a user ID: active conversation, append message, recent history (limit), close conversation, record model call. Test: integration `store_test.go` per method with two seeded users, asserting ordering, limit, and that user B's data never appears in user A's results; "unscoped call returns error".
 
