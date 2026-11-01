@@ -120,6 +120,8 @@ func (a *Agent) recordCalls(ctx context.Context, user identity.UserID, conversat
 		if err := a.store.RecordModelCall(ctx, user, call); err != nil {
 			return fmt.Errorf("record model call: %w", err)
 		}
+		slog.InfoContext(ctx, "model call finished",
+			"model", call.Model, "status", call.Status, "latency_ms", call.Latency.Milliseconds())
 	}
 	return nil
 }
