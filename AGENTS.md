@@ -125,7 +125,7 @@ These restate the constitution as code-level checks. Reviews reject any diff tha
 ```sh
 gofmt -l . && go vet ./...                  # must be clean
 go test ./...                               # unit tests, must be green before ticking a task
-go test -tags integration ./...             # needs Docker (Postgres container)
+go test -tags integration ./...             # needs Docker, or TEST_DATABASE_URL set to a Postgres server
 go test -tags eval ./evals/...              # real models via LiteLLM; costs money; only when asked
 openspec validate --all --strict            # before every commit that touches openspec/
 openspec show <change> --type change --diff # review a change's deltas against current specs
