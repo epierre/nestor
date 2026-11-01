@@ -123,6 +123,12 @@ type FakeStore struct {
 	conversations []store.Conversation
 	messages      []store.Message
 	modelCalls    []store.ModelCall
+	identities    map[identityKey]identity.UserID
+}
+
+type identityKey struct {
+	platform   string
+	externalID string
 }
 
 // NewFakeStore returns an empty FakeStore.
@@ -149,6 +155,34 @@ func (s *FakeStore) owns(user identity.UserID, conversationID int64) bool {
 	return slices.ContainsFunc(s.conversations, func(c store.Conversation) bool {
 		return c.ID == conversationID && c.UserID == user
 	})
+}
+
+// AddIdentity makes the platform identity resolve to user.
+func (s *FakeStore) AddIdentity(platform, externalID string, user identity.UserID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.identities == nil {
+		s.identities = make(map[identityKey]identity.UserID)
+	}
+	s.identities[identityKey{platform, externalID}] = user
+}
+
+// DisableIdentity stops the platform identity from resolving.
+func (s *FakeStore) DisableIdentity(platform, externalID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.identities, identityKey{platform, externalID})
+}
+
+// ResolveIdentity returns the user of an enabled platform identity.
+func (s *FakeStore) ResolveIdentity(_ context.Context, platform, externalID string) (identity.UserID, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.identities[identityKey{platform, externalID}]
+	if !ok {
+		return 0, store.ErrIdentityNotFound
+	}
+	return user, nil
 }
 
 // ActiveConversation implements store.Store.
