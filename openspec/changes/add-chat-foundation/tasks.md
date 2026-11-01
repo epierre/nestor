@@ -17,9 +17,9 @@
 
 ## 4. Agent loop
 
-- [ ] 4.1 Build request from system prompt + the user's history; persist user and assistant messages. Test: `agent_test.go` "history within limit", "history beyond limit", "restart keeps context" (fake store with persistence), "two users never see each other's messages".
-- [ ] 4.2 Bounded iterations and failure notices. Test: `agent_test.go` "runaway loop stops at max", "model error yields notice".
-- [ ] 4.3 Record every model call with redacted request. Test: `agent_test.go` "call recorded on success and failure", "no Authorization in stored request".
+- [x] 4.1 Build request from system prompt + the user's history; persist user and assistant messages. Test: `agent_test.go` "history within limit", "history beyond limit", "restart keeps context" (fake store with persistence), "two users never see each other's messages".
+- [x] 4.2 Bounded iterations and failure notices. Test: `agent_test.go` "runaway loop stops at max", "model error yields notice".
+- [x] 4.3 Record every model call with redacted request. Test: `agent_test.go` "call recorded on success and failure", "no Authorization in stored request".
 
 ## 5. Telegram channel
 
