@@ -3,6 +3,7 @@ package testutil
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"sync"
 	"time"
@@ -67,15 +68,44 @@ type FakeModel struct {
 	requests []model.CompletionRequest
 }
 
-// Complete records req and returns what Reply produces for it.
+// Complete records req and returns what Reply produces for it. Like a real client it reports the
+// attempt it made, unless Reply scripts its own Attempts.
 func (m *FakeModel) Complete(_ context.Context, req model.CompletionRequest) (model.CompletionResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.requests = append(m.requests, req)
-	if m.Reply == nil {
-		return model.CompletionResponse{}, nil
+	var resp model.CompletionResponse
+	var err error
+	if m.Reply != nil {
+		resp, err = m.Reply(req)
 	}
-	return m.Reply(req)
+	if len(resp.Attempts) == 0 {
+		attempt, encodeErr := fakeAttempt(req, resp, err)
+		if encodeErr != nil {
+			return model.CompletionResponse{}, encodeErr
+		}
+		resp.Attempts = []model.Attempt{attempt}
+	}
+	return resp, err
+}
+
+func fakeAttempt(req model.CompletionRequest, resp model.CompletionResponse, callErr error) (model.Attempt, error) {
+	request, err := json.Marshal(req)
+	if err != nil {
+		return model.Attempt{}, err
+	}
+	attempt := model.Attempt{
+		StartedAt: time.Now(),
+		Latency:   time.Millisecond,
+		Request:   request,
+		Err:       callErr,
+	}
+	if callErr == nil {
+		if attempt.Response, err = json.Marshal(resp); err != nil {
+			return model.Attempt{}, err
+		}
+	}
+	return attempt, nil
 }
 
 // Requests returns the requests received so far.

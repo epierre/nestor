@@ -2,10 +2,16 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
@@ -304,5 +310,261 @@ func assertStored(t *testing.T, m store.Message, user identity.UserID, role mode
 	t.Helper()
 	if m.UserID != user || m.Role != role || m.Content != content || m.CreatedAt.IsZero() {
 		t.Errorf("got message %+v, want %s %q of user %d", m, role, content, user)
+	}
+}
+
+const testAPIKey = "test-token"
+
+// proxyAgent returns an agent using the real model client against a server that answers every
+// request with status and body, and a counter of the requests it received.
+func proxyAgent(t *testing.T, st *testutil.FakeStore, status int, body string) (*Agent, *atomic.Int32) {
+	t.Helper()
+	requests := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return New(model.NewClient(server.URL, testAPIKey), st, testOptions()), requests
+}
+
+func TestCallRecordedOnSuccess(t *testing.T) {
+	const user identity.UserID = 1
+	cost := 0.25
+	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+		return model.CompletionResponse{
+			Content: "hello back",
+			Usage:   model.Usage{PromptTokens: 12, CompletionTokens: 3, CostUSD: &cost},
+		}, nil
+	}}
+	st := testutil.NewFakeStore()
+
+	send(t, New(client, st, testOptions()), user, "hello")
+
+	calls := st.ModelCalls(user)
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(calls))
+	}
+	got := calls[0]
+	if got.UserID != user || got.ConversationID == 0 || got.Model != "cheap" || got.StartedAt.IsZero() ||
+		got.Latency <= 0 || got.Status != store.CallStatusOK || got.Error != "" {
+		t.Errorf("got call %+v", got)
+	}
+	if got.PromptTokens != 12 || got.CompletionTokens != 3 || got.CostUSD == nil || *got.CostUSD != cost {
+		t.Errorf("got usage %d, %d, %v", got.PromptTokens, got.CompletionTokens, got.CostUSD)
+	}
+	if !json.Valid(got.RequestJSON) || !strings.Contains(string(got.RequestJSON), "hello") {
+		t.Errorf("got request %s", got.RequestJSON)
+	}
+	if !json.Valid(got.ResponseJSON) || !strings.Contains(string(got.ResponseJSON), "hello back") {
+		t.Errorf("got response %s", got.ResponseJSON)
+	}
+}
+
+func TestCallRecordedOnFailure(t *testing.T) {
+	const user identity.UserID = 1
+	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+		return model.CompletionResponse{Attempts: []model.Attempt{{
+			StartedAt: time.Now(),
+			Latency:   30 * time.Second,
+			Request:   []byte(`{"model":"cheap"}`),
+			Err:       context.DeadlineExceeded,
+		}}}, context.DeadlineExceeded
+	}}
+	st := testutil.NewFakeStore()
+
+	reply := send(t, New(client, st, testOptions()), user, "hello")
+
+	if reply != noticeModelFailure {
+		t.Errorf("got reply %q, want the failure notice", reply)
+	}
+	calls := st.ModelCalls(user)
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(calls))
+	}
+	got := calls[0]
+	if got.Status != store.CallStatusError || got.Error != context.DeadlineExceeded.Error() {
+		t.Errorf("got status %q, error %q", got.Status, got.Error)
+	}
+	if string(got.RequestJSON) != `{"model":"cheap"}` {
+		t.Errorf("got request %s", got.RequestJSON)
+	}
+	if got.ResponseJSON != nil {
+		t.Errorf("got response %s, want none", got.ResponseJSON)
+	}
+	if got.CostUSD != nil {
+		t.Errorf("got cost %v, want null", *got.CostUSD)
+	}
+}
+
+func TestCallWithoutReportedCostStaysNull(t *testing.T) {
+	st := testutil.NewFakeStore()
+
+	send(t, New(numberedReplies(), st, testOptions()), 1, "hello")
+
+	if got := st.ModelCalls(1); len(got) != 1 || got[0].CostUSD != nil {
+		t.Errorf("got calls %+v, want one with null cost", got)
+	}
+}
+
+func TestProviderReturns503Twice(t *testing.T) {
+	const user identity.UserID = 1
+	st := testutil.NewFakeStore()
+	a, requests := proxyAgent(t, st, http.StatusServiceUnavailable, "busy")
+
+	reply := send(t, a, user, "hello")
+
+	if reply != noticeModelFailure {
+		t.Errorf("got reply %q, want the failure notice", reply)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("proxy received %d requests, want 2", got)
+	}
+	calls := st.ModelCalls(user)
+	if len(calls) != 2 {
+		t.Fatalf("got %d calls, want 2", len(calls))
+	}
+	for _, call := range calls {
+		if call.Status != store.CallStatusError || !strings.Contains(call.Error, "503") {
+			t.Errorf("got status %q, error %q", call.Status, call.Error)
+		}
+		if want := `"busy"`; string(call.ResponseJSON) != want {
+			t.Errorf("got response %s, want the body as a JSON string %s", call.ResponseJSON, want)
+		}
+	}
+}
+
+func TestRetriedCallChargesOnlyTheSuccessfulAttempt(t *testing.T) {
+	const user identity.UserID = 1
+	cost := 0.25
+	failure := &model.StatusError{Code: http.StatusServiceUnavailable}
+	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+		return model.CompletionResponse{
+			Content: "hello back",
+			Usage:   model.Usage{PromptTokens: 12, CompletionTokens: 3, CostUSD: &cost},
+			Attempts: []model.Attempt{
+				{StartedAt: time.Now(), Latency: time.Millisecond, Request: []byte(`{}`), Err: failure},
+				{StartedAt: time.Now(), Latency: time.Millisecond, Request: []byte(`{}`), Response: []byte(`{}`)},
+			},
+		}, nil
+	}}
+	st := testutil.NewFakeStore()
+
+	if reply := send(t, New(client, st, testOptions()), user, "hello"); reply != "hello back" {
+		t.Errorf("got reply %q", reply)
+	}
+
+	calls := st.ModelCalls(user)
+	if len(calls) != 2 {
+		t.Fatalf("got %d calls, want 2", len(calls))
+	}
+	failed, succeeded := calls[0], calls[1]
+	if failed.Status != store.CallStatusError || failed.PromptTokens != 0 || failed.CostUSD != nil {
+		t.Errorf("got failed call %+v", failed)
+	}
+	if succeeded.Status != store.CallStatusOK || succeeded.PromptTokens != 12 || succeeded.CostUSD == nil {
+		t.Errorf("got successful call %+v", succeeded)
+	}
+}
+
+func TestProviderReturns400(t *testing.T) {
+	const user identity.UserID = 1
+	st := testutil.NewFakeStore()
+	a, requests := proxyAgent(t, st, http.StatusBadRequest, `{"error": {"message": "bad"}}`)
+
+	reply := send(t, a, user, "hello")
+
+	if reply != noticeModelFailure {
+		t.Errorf("got reply %q, want the failure notice", reply)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("proxy received %d requests, want 1", got)
+	}
+	calls := st.ModelCalls(user)
+	if len(calls) != 1 || calls[0].Status != store.CallStatusError {
+		t.Fatalf("got calls %+v, want one with status error", calls)
+	}
+	if want := `{"error": {"message": "bad"}}`; string(calls[0].ResponseJSON) != want {
+		t.Errorf("got response %s, want %s", calls[0].ResponseJSON, want)
+	}
+}
+
+func TestEmptyErrorBodyStoredAsNoResponse(t *testing.T) {
+	st := testutil.NewFakeStore()
+	a, _ := proxyAgent(t, st, http.StatusBadRequest, "")
+
+	send(t, a, 1, "hello")
+
+	if got := st.ModelCalls(1); len(got) != 1 || got[0].ResponseJSON != nil {
+		t.Errorf("got calls %+v, want one without a response", got)
+	}
+}
+
+func TestNoAuthorizationInStoredRequest(t *testing.T) {
+	const user identity.UserID = 1
+	st := testutil.NewFakeStore()
+	a, _ := proxyAgent(t, st, http.StatusUnauthorized, `{"error": {"message": "bad key `+testAPIKey+`"}}`)
+
+	send(t, a, user, "hello")
+
+	calls := st.ModelCalls(user)
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(calls))
+	}
+	stored, err := json.Marshal(calls[0])
+	if err != nil {
+		t.Fatalf("encode call: %v", err)
+	}
+	for _, secret := range []string{testAPIKey, "Authorization", "Bearer"} {
+		if strings.Contains(string(stored), secret) {
+			t.Errorf("stored call contains %q: %s", secret, stored)
+		}
+	}
+}
+
+func TestRunawayLoopRecordsEveryCall(t *testing.T) {
+	const user identity.UserID = 1
+	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+		return model.CompletionResponse{ToolCalls: []model.ToolCall{{ID: "call_1", Name: "anything"}}}, nil
+	}}
+	st := testutil.NewFakeStore()
+
+	send(t, New(client, st, testOptions()), user, "hello")
+
+	if got := len(st.ModelCalls(user)); got != testMaxIterations {
+		t.Errorf("recorded %d calls, want %d", got, testMaxIterations)
+	}
+}
+
+func TestCallsRecordedForTheirOwnUser(t *testing.T) {
+	st := testutil.NewFakeStore()
+	a := New(numberedReplies(), st, testOptions())
+
+	send(t, a, 1, "hello")
+	send(t, a, 1, "again")
+	send(t, a, 2, "hello")
+
+	if first, second := len(st.ModelCalls(1)), len(st.ModelCalls(2)); first != 2 || second != 1 {
+		t.Errorf("got %d and %d calls, want 2 and 1", first, second)
+	}
+}
+
+// brokenLog accepts everything but model calls.
+type brokenLog struct {
+	*testutil.FakeStore
+}
+
+func (brokenLog) RecordModelCall(context.Context, identity.UserID, store.ModelCall) error {
+	return errStoreDown
+}
+
+func TestUnrecordableCallReturnsError(t *testing.T) {
+	a := New(numberedReplies(), brokenLog{testutil.NewFakeStore()}, testOptions())
+
+	_, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "hello")
+
+	if !errors.Is(err, errStoreDown) {
+		t.Errorf("got error %v, want %v", err, errStoreDown)
 	}
 }

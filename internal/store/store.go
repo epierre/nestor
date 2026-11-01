@@ -37,6 +37,12 @@ type Message struct {
 	CreatedAt      time.Time
 }
 
+// Values of ModelCall.Status.
+const (
+	CallStatusOK    = "ok"
+	CallStatusError = "error"
+)
+
 // ModelCall is one row of the call log.
 type ModelCall struct {
 	ID               int64
