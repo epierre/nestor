@@ -103,15 +103,90 @@ func TestHandleMessageWithoutUserMakesNoModelCall(t *testing.T) {
 	}
 }
 
-func TestHandleMessageReturnsModelError(t *testing.T) {
-	boom := errors.New("boom")
+func TestModelErrorYieldsNotice(t *testing.T) {
+	const user identity.UserID = 1
 	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
-		return model.CompletionResponse{}, boom
+		return model.CompletionResponse{}, errors.New("boom")
+	}}
+	st := testutil.NewFakeStore()
+
+	reply := send(t, New(client, st, testOptions()), user, "hello")
+
+	if reply != noticeModelFailure {
+		t.Errorf("got reply %q, want %q", reply, noticeModelFailure)
+	}
+	got := stored(t, st, user)
+	if len(got) != 1 {
+		t.Fatalf("stored %d messages, want only the user's", len(got))
+	}
+	assertStored(t, got[0], user, model.RoleUser, "hello")
+}
+
+func TestRunawayLoopStopsAtMax(t *testing.T) {
+	const user identity.UserID = 1
+	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+		return model.CompletionResponse{ToolCalls: []model.ToolCall{{ID: "call_1", Name: "anything"}}}, nil
+	}}
+	st := testutil.NewFakeStore()
+
+	reply := send(t, New(client, st, testOptions()), user, "hello")
+
+	if got := len(client.Requests()); got != testMaxIterations {
+		t.Errorf("made %d model calls, want %d", got, testMaxIterations)
+	}
+	if reply != noticeLoopLimit {
+		t.Errorf("got reply %q, want %q", reply, noticeLoopLimit)
+	}
+	if got := stored(t, st, user); len(got) != 1 {
+		t.Errorf("stored %d messages, want only the user's", len(got))
+	}
+}
+
+func TestToolCallIsAnsweredWithToolRoleError(t *testing.T) {
+	call := model.ToolCall{ID: "call_1", Name: "anything"}
+	turns := []model.CompletionResponse{{ToolCalls: []model.ToolCall{call}}, {Content: "sorry"}}
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		return turns[(len(req.Messages)-2)/2], nil
 	}}
 
-	ctx := identity.WithUser(context.Background(), 1)
-	if _, err := newAgent(client).HandleMessage(ctx, "hello"); !errors.Is(err, boom) {
-		t.Errorf("got error %v, want %v", err, boom)
+	reply := send(t, newAgent(client), 1, "hello")
+
+	if reply != "sorry" {
+		t.Errorf("got reply %q, want %q", reply, "sorry")
+	}
+	want := []model.Message{
+		text(model.RoleSystem, "be helpful"),
+		text(model.RoleUser, "hello"),
+		{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{call}},
+		{Role: model.RoleTool, ToolCallID: "call_1", Content: toolsUnavailable},
+	}
+	if got := lastRequest(t, client).Messages; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// brokenStore fails the way a store does when the database goes away.
+type brokenStore struct {
+	store.Store
+}
+
+var errStoreDown = errors.New("store down")
+
+func (brokenStore) ActiveConversation(context.Context, identity.UserID) (store.Conversation, error) {
+	return store.Conversation{}, errStoreDown
+}
+
+func TestStoreFailureReturnsError(t *testing.T) {
+	client := numberedReplies()
+	a := New(client, brokenStore{}, testOptions())
+
+	_, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "hello")
+
+	if !errors.Is(err, errStoreDown) {
+		t.Errorf("got error %v, want %v", err, errStoreDown)
+	}
+	if got := len(client.Requests()); got != 0 {
+		t.Errorf("made %d model calls, want 0", got)
 	}
 }
 
@@ -199,24 +274,30 @@ func TestTwoUsersNeverSeeEachOthersMessages(t *testing.T) {
 
 func TestPersistsUserMessageAndReply(t *testing.T) {
 	const user identity.UserID = 1
-	ctx := identity.WithUser(context.Background(), user)
 	st := testutil.NewFakeStore()
 
 	send(t, New(numberedReplies(), st, testOptions()), user, "hello")
 
-	conversation, err := st.ActiveConversation(ctx, user)
-	if err != nil {
-		t.Fatalf("ActiveConversation: %v", err)
-	}
-	got, err := st.RecentMessages(ctx, user, conversation.ID, 10)
-	if err != nil {
-		t.Fatalf("RecentMessages: %v", err)
-	}
+	got := stored(t, st, user)
 	if len(got) != 2 {
 		t.Fatalf("got %d messages, want 2", len(got))
 	}
 	assertStored(t, got[0], user, model.RoleUser, "hello")
 	assertStored(t, got[1], user, model.RoleAssistant, "reply 1")
+}
+
+func stored(t *testing.T, st *testutil.FakeStore, user identity.UserID) []store.Message {
+	t.Helper()
+	ctx := identity.WithUser(context.Background(), user)
+	conversation, err := st.ActiveConversation(ctx, user)
+	if err != nil {
+		t.Fatalf("ActiveConversation: %v", err)
+	}
+	messages, err := st.RecentMessages(ctx, user, conversation.ID, 100)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	return messages
 }
 
 func assertStored(t *testing.T, m store.Message, user identity.UserID, role model.Role, content string) {
