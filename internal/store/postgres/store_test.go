@@ -5,9 +5,11 @@ package postgres
 import (
 	"context"
 	"errors"
+	neturl "net/url"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -257,5 +259,204 @@ func TestModelCallCostStaysNull(t *testing.T) {
 	}
 	if cost != nil {
 		t.Errorf("got cost %v, want null", *cost)
+	}
+}
+
+type identityRow struct {
+	UserID   int64
+	Name     string
+	Disabled bool
+}
+
+// identities returns the rows of platform keyed by external ID.
+func identities(t *testing.T, pool *pgxpool.Pool, platform string) map[string]identityRow {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT i.external_id, i.user_id, u.display_name, i.disabled_at IS NOT NULL
+		FROM user_identities i JOIN users u ON u.id = i.user_id
+		WHERE i.platform = $1`, platform)
+	if err != nil {
+		t.Fatalf("list identities: %v", err)
+	}
+	defer rows.Close()
+	found := make(map[string]identityRow)
+	for rows.Next() {
+		var id string
+		var row identityRow
+		if err := rows.Scan(&id, &row.UserID, &row.Name, &row.Disabled); err != nil {
+			t.Fatalf("scan identity: %v", err)
+		}
+		found[id] = row
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list identities: %v", err)
+	}
+	return found
+}
+
+func syncAllowlist(t *testing.T, st *Store, platform string, allowed ...AllowedIdentity) {
+	t.Helper()
+	if err := st.SyncAllowlist(context.Background(), platform, allowed); err != nil {
+		t.Fatalf("SyncAllowlist: %v", err)
+	}
+}
+
+func count(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), sql, args...).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", sql, err)
+	}
+	return n
+}
+
+var (
+	ana = AllowedIdentity{ExternalID: "100", DisplayName: "Ana"}
+	ben = AllowedIdentity{ExternalID: "200", DisplayName: "Ben"}
+)
+
+func TestAllowlistUpsertIdempotent(t *testing.T) {
+	pool := migrated(t)
+	st := New(pool)
+
+	syncAllowlist(t, st, "telegram", ana, ben)
+	first := identities(t, pool, "telegram")
+	syncAllowlist(t, st, "telegram", ana, ben)
+
+	if got := identities(t, pool, "telegram"); !reflect.DeepEqual(got, first) {
+		t.Errorf("second sync changed identities: got %+v, want %+v", got, first)
+	}
+	if len(first) != 2 || first["100"].Name != "Ana" || first["200"].Name != "Ben" {
+		t.Errorf("got identities %+v", first)
+	}
+	if first["100"].UserID == first["200"].UserID {
+		t.Errorf("both identities share user %d", first["100"].UserID)
+	}
+	if got := count(t, pool, `SELECT count(*) FROM users`); got != 2 {
+		t.Errorf("got %d users, want 2", got)
+	}
+}
+
+func TestAllowlistRenamesUser(t *testing.T) {
+	pool := migrated(t)
+	st := New(pool)
+	syncAllowlist(t, st, "telegram", ana)
+	before := identities(t, pool, "telegram")["100"]
+
+	syncAllowlist(t, st, "telegram", AllowedIdentity{ExternalID: "100", DisplayName: "Anna"})
+
+	want := identityRow{UserID: before.UserID, Name: "Anna"}
+	if got := identities(t, pool, "telegram")["100"]; got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestAllowlistRemovedIdentityDisabledDataKept(t *testing.T) {
+	ctx := context.Background()
+	pool := migrated(t)
+	st := New(pool)
+	syncAllowlist(t, st, "telegram", ana, ben)
+	benID := identities(t, pool, "telegram")["200"].UserID
+	conversation := openConversation(t, pool, benID)
+	_, err := pool.Exec(ctx, `INSERT INTO messages (user_id, conversation_id, role, content)
+		VALUES ($1, $2, 'user', 'hello')`, benID, conversation)
+	if err != nil {
+		t.Fatalf("insert message: %v", err)
+	}
+
+	syncAllowlist(t, st, "telegram", ana)
+
+	got := identities(t, pool, "telegram")
+	if !got["200"].Disabled {
+		t.Errorf("removed identity %+v is not disabled", got["200"])
+	}
+	if got["100"].Disabled {
+		t.Errorf("kept identity %+v is disabled", got["100"])
+	}
+	if n := count(t, pool, `SELECT count(*) FROM messages WHERE user_id = $1`, benID); n != 1 {
+		t.Errorf("removed user has %d messages, want 1", n)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM conversations WHERE user_id = $1`, benID); n != 1 {
+		t.Errorf("removed user has %d conversations, want 1", n)
+	}
+}
+
+func TestAllowlistKeepsFirstDisabledTime(t *testing.T) {
+	pool := migrated(t)
+	st := New(pool)
+	syncAllowlist(t, st, "telegram", ana, ben)
+	syncAllowlist(t, st, "telegram", ana)
+	const query = `SELECT disabled_at FROM user_identities WHERE external_id = '200'`
+	var first, second time.Time
+	if err := pool.QueryRow(context.Background(), query).Scan(&first); err != nil {
+		t.Fatalf("read disabled_at: %v", err)
+	}
+
+	syncAllowlist(t, st, "telegram", ana)
+
+	if err := pool.QueryRow(context.Background(), query).Scan(&second); err != nil {
+		t.Fatalf("read disabled_at: %v", err)
+	}
+	if !second.Equal(first) {
+		t.Errorf("disabled_at moved from %v to %v", first, second)
+	}
+}
+
+func TestAllowlistReAddedIdentityKeepsUser(t *testing.T) {
+	pool := migrated(t)
+	st := New(pool)
+	syncAllowlist(t, st, "telegram", ana, ben)
+	before := identities(t, pool, "telegram")["200"]
+	syncAllowlist(t, st, "telegram", ana)
+
+	syncAllowlist(t, st, "telegram", ana, ben)
+
+	if got := identities(t, pool, "telegram")["200"]; got != before {
+		t.Errorf("got %+v, want %+v", got, before)
+	}
+}
+
+func TestAllowlistEmptyDisablesEveryone(t *testing.T) {
+	pool := migrated(t)
+	st := New(pool)
+	syncAllowlist(t, st, "telegram", ana, ben)
+
+	syncAllowlist(t, st, "telegram")
+
+	for id, row := range identities(t, pool, "telegram") {
+		if !row.Disabled {
+			t.Errorf("identity %s is not disabled", id)
+		}
+	}
+}
+
+func TestAllowlistLeavesOtherPlatformsAlone(t *testing.T) {
+	pool := migrated(t)
+	st := New(pool)
+	syncAllowlist(t, st, "signal", ana)
+
+	syncAllowlist(t, st, "telegram", ben)
+
+	if got := identities(t, pool, "signal")["100"]; got.Disabled {
+		t.Errorf("other platform's identity %+v was disabled", got)
+	}
+}
+
+func TestOpenMigrates(t *testing.T) {
+	url, err := neturl.Parse(serverURL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	pool := newDatabase(t)
+	url.Path = "/" + pool.Config().ConnConfig.Database
+
+	st, err := Open(context.Background(), url.String())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	st.Close()
+
+	if got := tables(t, pool); !reflect.DeepEqual(got, appTables) {
+		t.Errorf("tables %v, want %v", got, appTables)
 	}
 }
