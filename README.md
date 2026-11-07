@@ -70,7 +70,7 @@ Each step is one OpenSpec change, delivered as a thin vertical slice that runs e
 
 | # | Change | Scope | Status |
 |---|--------|-------|--------|
-| 1 | [`add-chat-foundation`](openspec/changes/add-chat-foundation/) | Telegram chat, agent loop, persistence, call logging | Specified |
+| 1 | [`add-chat-foundation`](openspec/changes/add-chat-foundation/) | Telegram chat, agent loop, persistence, call logging | In progress |
 | 2 | [`add-tool-approval-gate`](openspec/changes/add-tool-approval-gate/) | Tool registry, risk levels, approve/edit/reject flow | Specified |
 | 3 | `add-tasks-and-reminders` | First real tools plus the scheduler | Planned |
 | 4 | `add-model-routing` | Model tiers, fallbacks, cost tracking, budget alerts | Planned |
@@ -82,7 +82,7 @@ Each step is one OpenSpec change, delivered as a thin vertical slice that runs e
 | 10 | [`add-skills`](openspec/changes/add-skills/) | Reviewed, pinned skills, optional sandboxed scripts | Specified |
 | 11 | `add-household-users` | (Later, optional) further users, per-user budgets | Planned |
 
-Changes 9 and 10 depend only on change 2 and can be pulled earlier. No change is implemented yet.
+Changes 9 and 10 depend only on change 2 and can be pulled earlier.
 
 ## Repository layout
 
@@ -97,11 +97,76 @@ openspec/changes/    One folder per change: proposal, design, specs and tasks
 
 ## Running the stack
 
-You need Docker with the Compose plugin, a Telegram bot token, and Gemini and Anthropic API keys.
+You need Docker with the Compose plugin, a Telegram bot token from
+[@BotFather](https://t.me/BotFather), your numeric Telegram ID, and Gemini and Anthropic API keys.
 
 ```sh
 cp deploy/.env.example deploy/.env   # then replace every value
 docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+Nestor applies database migrations and syncs the allowlist each time it starts.
+
+### Environment variables
+
+Set these in `deploy/.env`, which git ignores.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | The bot's token |
+| `ALLOWED_TELEGRAM_USERS` | Yes | Comma-separated `telegram_id:display_name` pairs. Only these people are served; removing one disables them and keeps their data |
+| `POSTGRES_PASSWORD` | Yes | Database password, also used inside a URL, so keep it URL-safe |
+| `LITELLM_MASTER_KEY` | Yes | Key Nestor uses to reach the LiteLLM proxy. Must start with `sk-` |
+| `GEMINI_API_KEY` | Yes | Provider key for the `cheap` alias. Stays inside the LiteLLM container |
+| `ANTHROPIC_API_KEY` | Yes | Provider key for the `strong` alias. Stays inside the LiteLLM container |
+| `LLM_MODEL` | No | Model alias to use. Default `cheap` |
+| `HISTORY_LIMIT` | No | Messages of the conversation sent to the model. Default 30 |
+| `MAX_LOOP_ITERATIONS` | No | Model calls allowed for one message. Default 8 |
+
+### Using the bot
+
+Send it a text message. `/new` starts a fresh conversation. Other message types get a short
+notice, and messages from anyone not on the allowlist are ignored and logged.
+
+### Querying the call log
+
+Every model request is a row in `model_calls`, with its request and response bodies. A retried
+request is two rows. Open a database shell with:
+
+```sh
+docker compose -f deploy/docker-compose.yml exec postgres psql -U nestor nestor
+```
+
+The latest calls:
+
+```sql
+SELECT started_at, user_id, model, status, latency_ms, prompt_tokens, completion_tokens, cost_usd, error
+FROM model_calls ORDER BY started_at DESC LIMIT 20;
+```
+
+What each user has spent. `cost_usd` is null when the proxy reports no cost, so this total can be
+an underestimate; the last column shows how many calls it leaves out:
+
+```sql
+SELECT u.display_name, count(*) AS calls, sum(c.cost_usd) AS cost_usd, count(*) - count(c.cost_usd) AS uncosted
+FROM model_calls c JOIN users u ON u.id = c.user_id
+GROUP BY u.display_name ORDER BY cost_usd DESC NULLS LAST;
+```
+
+Why a call failed:
+
+```sql
+SELECT started_at, error, response_json FROM model_calls
+WHERE status = 'error' ORDER BY started_at DESC LIMIT 5;
+```
+
+### Reading the logs
+
+Logs are JSON lines. All lines for one message share a `request_id` and `user_id`, and they never
+contain message text. To follow one message:
+
+```sh
+docker compose -f deploy/docker-compose.yml logs nestor | grep '"request_id":"THE_ID"'
 ```
 
 ### Manual smoke test
@@ -109,9 +174,18 @@ docker compose -f deploy/docker-compose.yml up -d --build
 1. `docker compose -f deploy/docker-compose.yml ps` shows `postgres` and `litellm` as healthy
    and `nestor` as running.
 2. `docker compose -f deploy/docker-compose.yml logs nestor` shows `nestor started`, with no
-   secret in the output.
-3. Once the Telegram channel exists (task 5.2), message the bot, get a reply, and check that a
-   `model_calls` row was written. Until then, stop at step 2.
+   secret in the output and no `telegram poll failed` lines.
+3. From an allowlisted account, send the bot "hello" and get a reply. The logs show
+   `message received`, `model call finished` and `reply sent` with the same `request_id`.
+4. The first query above shows one new row with status `ok`, non-zero latency and token counts.
+   `cost_usd` should be filled in; if it is null, the proxy reported no cost for that model.
+5. Send "my code word is falcon", then "what is my code word?". The reply knows it.
+6. Restart with `docker compose -f deploy/docker-compose.yml restart nestor` and ask again. It
+   still knows.
+7. Send `/new`, then ask again. It no longer knows.
+8. Send a voice message. You get the text-only notice and no new `model_calls` row.
+9. From an account not on the allowlist, message the bot. Nothing comes back, and the logs show
+   `ignored message from unknown sender`.
 
 ## Contributing
 

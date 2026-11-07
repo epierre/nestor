@@ -17,6 +17,7 @@ import (
 
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store"
 )
 
@@ -117,6 +118,7 @@ func (c *Channel) handle(ctx context.Context, h channel.Handler, u update) error
 		return nil
 	}
 	m := u.Message
+	ctx = obs.WithRequestID(ctx, obs.NewRequestID())
 	user, err := c.identities.ResolveIdentity(ctx, platform, strconv.FormatInt(m.From.ID, 10))
 	if errors.Is(err, store.ErrIdentityNotFound) {
 		slog.WarnContext(ctx, "ignored message from unknown sender", "telegram_id", m.From.ID)
@@ -127,9 +129,12 @@ func (c *Channel) handle(ctx context.Context, h channel.Handler, u update) error
 		return fmt.Errorf("resolve sender: %w", err)
 	}
 
+	ctx = identity.WithUser(ctx, user)
+	slog.InfoContext(ctx, "message received")
+
 	reply := noticeTextOnly
 	if m.Text != "" {
-		reply, err = h.HandleMessage(identity.WithUser(ctx, user), m.Text)
+		reply, err = h.HandleMessage(ctx, m.Text)
 		if err != nil {
 			slog.ErrorContext(ctx, "message handling failed", "error", err)
 			reply = noticeFailure
@@ -140,7 +145,11 @@ func (c *Channel) handle(ctx context.Context, h channel.Handler, u update) error
 		slog.ErrorContext(ctx, "reply refused", "error", err)
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	slog.InfoContext(ctx, "reply sent")
+	return nil
 }
 
 // Send delivers text to the chat in consecutive messages within Telegram's size limit, retrying

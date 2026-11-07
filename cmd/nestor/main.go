@@ -14,6 +14,7 @@ import (
 	"github.com/epierre/nestor/internal/channel/telegram"
 	"github.com/epierre/nestor/internal/config"
 	"github.com/epierre/nestor/internal/model"
+	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store/postgres"
 )
 
@@ -23,7 +24,7 @@ const (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(os.Stdout, nil))))
 	if err := run(); err != nil {
 		slog.Error("nestor stopped", "error", err)
 		os.Exit(1)
