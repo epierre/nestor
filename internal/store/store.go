@@ -9,6 +9,7 @@ import (
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
+	"github.com/epierre/nestor/internal/tools"
 )
 
 var (
@@ -63,6 +64,31 @@ type ModelCall struct {
 	ResponseJSON     json.RawMessage
 }
 
+// Values of ToolCall.Status.
+const (
+	ToolCallStatusExecuted = "executed"
+	ToolCallStatusRejected = "rejected"
+	ToolCallStatusError    = "error"
+	ToolCallStatusPending  = "pending"
+	ToolCallStatusProposed = "proposed"
+)
+
+// ToolCall is one row of the tool call log.
+type ToolCall struct {
+	ID             int64
+	UserID         identity.UserID
+	ConversationID int64
+	ModelCallID    *int64
+	ToolName       string
+	ArgsJSON       json.RawMessage
+	Risk           tools.Risk
+	Status         string
+	ResultJSON     json.RawMessage
+	Error          string
+	StartedAt      time.Time
+	Latency        time.Duration
+}
+
 // Store persists conversations, messages and model calls. Every method takes the user ID
 // explicitly and must call RequireUser before doing any work.
 type Store interface {
@@ -74,6 +100,7 @@ type Store interface {
 	// RecentMessages returns up to limit of the newest messages, oldest first.
 	RecentMessages(ctx context.Context, user identity.UserID, conversationID int64, limit int) ([]Message, error)
 	RecordModelCall(ctx context.Context, user identity.UserID, call ModelCall) error
+	RecordToolCall(ctx context.Context, user identity.UserID, call ToolCall) error
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's

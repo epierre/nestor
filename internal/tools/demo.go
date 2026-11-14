@@ -42,7 +42,8 @@ func (t *CurrentTimeTool) Schema() json.RawMessage {
 				"type": "string",
 				"description": "Optional IANA time zone name (e.g. 'UTC', 'America/New_York')"
 			}
-		}
+		},
+		"additionalProperties": false
 	}`)
 }
 
@@ -118,7 +119,8 @@ func (t *NotifySelfTool) Schema() json.RawMessage {
 				"description": "The message text to send"
 			}
 		},
-		"required": ["text"]
+		"required": ["text"],
+		"additionalProperties": false
 	}`)
 }
 

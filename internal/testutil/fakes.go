@@ -123,6 +123,7 @@ type FakeStore struct {
 	conversations []store.Conversation
 	messages      []store.Message
 	modelCalls    []store.ModelCall
+	toolCalls     []store.ToolCall
 	identities    map[identityKey]identity.UserID
 }
 
@@ -274,6 +275,35 @@ func (s *FakeStore) ModelCalls(user identity.UserID) []store.ModelCall {
 	defer s.mu.Unlock()
 	var found []store.ModelCall
 	for _, c := range s.modelCalls {
+		if c.UserID == user {
+			found = append(found, c)
+		}
+	}
+	return found
+}
+
+// RecordToolCall implements store.Store.
+func (s *FakeStore) RecordToolCall(ctx context.Context, user identity.UserID, call store.ToolCall) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.owns(user, call.ConversationID) {
+		return store.ErrConversationNotFound
+	}
+	call.ID = s.id()
+	call.UserID = user
+	s.toolCalls = append(s.toolCalls, call)
+	return nil
+}
+
+// ToolCalls returns the tool calls recorded for user.
+func (s *FakeStore) ToolCalls(user identity.UserID) []store.ToolCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []store.ToolCall
+	for _, c := range s.toolCalls {
 		if c.UserID == user {
 			found = append(found, c)
 		}

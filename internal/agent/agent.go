@@ -2,11 +2,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
@@ -108,7 +110,11 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 		if a.opts.Tools == nil {
 			messages = appendToolRefusals(messages, resp)
 		} else {
-			messages = a.dispatchToolCalls(ctx, messages, resp)
+			var err error
+			messages, err = a.dispatchToolCalls(ctx, user, conversation.ID, messages, resp)
+			if err != nil {
+				return "", err
+			}
 		}
 	}
 	slog.WarnContext(ctx, "model call limit reached", "max_iterations", a.opts.MaxIterations)
@@ -177,27 +183,66 @@ func appendToolRefusals(messages []model.Message, resp model.CompletionResponse)
 	return messages
 }
 
-func (a *Agent) dispatchToolCalls(ctx context.Context, messages []model.Message, resp model.CompletionResponse) []model.Message {
+func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, conversationID int64, messages []model.Message, resp model.CompletionResponse) ([]model.Message, error) {
 	messages = append(messages, model.Message{
 		Role:      model.RoleAssistant,
 		ToolCalls: resp.ToolCalls,
 	})
 	for _, call := range resp.ToolCalls {
+		start := time.Now()
 		tool, err := a.opts.Tools.Lookup(call.Name)
-		var content string
+		var (
+			content    string
+			status     string
+			risk       tools.Risk
+			resultJSON json.RawMessage
+			errText    string
+		)
 		if err != nil {
+			status = store.ToolCallStatusRejected
+			errText = err.Error()
 			content = tools.MarkData(fmt.Sprintf("error: unknown tool %q", call.Name))
-		} else if valErr := a.opts.Tools.Validate(call.Name, call.Arguments); valErr != nil {
-			content = tools.MarkData(fmt.Sprintf("error: invalid arguments: %v", valErr))
-		} else if tool.Risk() == tools.RiskCritical {
-			content = tools.MarkData(fmt.Sprintf("error: critical tool %q requires approval gate", call.Name))
 		} else {
-			res, execErr := tool.Execute(ctx, call.Arguments)
-			if execErr != nil {
-				content = tools.MarkData(fmt.Sprintf("error: %v", execErr))
+			risk = tool.Risk()
+			if valErr := a.opts.Tools.Validate(call.Name, call.Arguments); valErr != nil {
+				status = store.ToolCallStatusRejected
+				errText = valErr.Error()
+				content = tools.MarkData(fmt.Sprintf("error: invalid arguments: %v", valErr))
+			} else if tool.Risk() == tools.RiskCritical {
+				status = store.ToolCallStatusRejected
+				errText = "critical tool requires approval gate"
+				content = tools.MarkData(fmt.Sprintf("error: critical tool %q requires approval gate", call.Name))
 			} else {
-				content = tools.MarkData(res.Content)
+				res, execErr := tool.Execute(ctx, call.Arguments)
+				if execErr != nil {
+					status = store.ToolCallStatusError
+					errText = execErr.Error()
+					content = tools.MarkData(fmt.Sprintf("error: %v", execErr))
+				} else {
+					status = store.ToolCallStatusExecuted
+					resBytes, _ := json.Marshal(res.Content)
+					resultJSON = resBytes
+					content = tools.MarkData(res.Content)
+				}
 			}
+		}
+		args := call.Arguments
+		if len(bytes.TrimSpace(args)) == 0 {
+			args = json.RawMessage("{}")
+		}
+		recordErr := a.store.RecordToolCall(ctx, user, store.ToolCall{
+			ConversationID: conversationID,
+			ToolName:       call.Name,
+			ArgsJSON:       args,
+			Risk:           risk,
+			Status:         status,
+			ResultJSON:     resultJSON,
+			Error:          errText,
+			StartedAt:      start,
+			Latency:        time.Since(start),
+		})
+		if recordErr != nil {
+			return nil, fmt.Errorf("record tool call: %w", recordErr)
 		}
 		messages = append(messages, model.Message{
 			Role:       model.RoleTool,
@@ -205,7 +250,7 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, messages []model.Message,
 			Content:    content,
 		})
 	}
-	return messages
+	return messages, nil
 }
 
 func (a *Agent) prompt(history []store.Message) []model.Message {

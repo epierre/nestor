@@ -247,6 +247,28 @@ func (s *Store) RecordModelCall(ctx context.Context, user identity.UserID, call 
 	return nil
 }
 
+// RecordToolCall implements store.Store. Latency is stored in milliseconds, rounded up from
+// below one so that a call that took time never reads as zero.
+func (s *Store) RecordToolCall(ctx context.Context, user identity.UserID, call store.ToolCall) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	latency := call.Latency.Milliseconds()
+	if latency == 0 && call.Latency > 0 {
+		latency = 1
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO tool_calls (user_id, conversation_id, model_call_id, tool_name, args_json,
+			risk, status, result_json, error, started_at, latency_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		user, call.ConversationID, call.ModelCallID, call.ToolName, call.ArgsJSON,
+		call.Risk, call.Status, call.ResultJSON, call.Error, call.StartedAt, latency)
+	if err != nil {
+		return fmt.Errorf("record tool call: %w", conversationError(err))
+	}
+	return nil
+}
+
 // conversationError turns the composite foreign key's refusal into ErrConversationNotFound.
 func conversationError(err error) error {
 	var pgErr *pgconn.PgError

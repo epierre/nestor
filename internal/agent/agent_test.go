@@ -690,4 +690,106 @@ func TestToolDispatch(t *testing.T) {
 			t.Errorf("tool message content not marked as data: %q", lastMsg.Content)
 		}
 	})
+	t.Run("tool receives requesting user in context", func(t *testing.T) {
+		var userInContext identity.UserID
+		tool := &testUserTool{
+			onExec: func(ctx context.Context) {
+				u, _ := identity.UserFrom(ctx)
+				userInContext = u
+			},
+		}
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tool)
+
+		call := model.ToolCall{ID: "call_inspect", Name: "inspect_user", Arguments: json.RawMessage(`{}`)}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Done."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		opts := testOptions()
+		opts.Tools = reg
+		st := testutil.NewFakeStore()
+		a := New(client, st, opts)
+
+		reply := send(t, a, 42, "inspect my user")
+		if reply != "Done." {
+			t.Errorf("got reply %q, want 'Done.'", reply)
+		}
+		if userInContext != 42 {
+			t.Errorf("expected tool to receive user 42 in context, got %v", userInContext)
+		}
+
+		recorded := st.ToolCalls(42)
+		if len(recorded) != 1 {
+			t.Fatalf("expected 1 recorded tool call for user 42, got %d", len(recorded))
+		}
+		if recorded[0].Status != store.ToolCallStatusExecuted {
+			t.Errorf("got recorded status %q, want %q", recorded[0].Status, store.ToolCallStatusExecuted)
+		}
+	})
+
+	t.Run("user_id argument rejected by schema", func(t *testing.T) {
+		call := model.ToolCall{
+			ID:        "call_exploit",
+			Name:      "current_time",
+			Arguments: json.RawMessage(`{"user_id": 999}`),
+		}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Refused."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewCurrentTimeTool())
+
+		opts := testOptions()
+		opts.Tools = reg
+		st := testutil.NewFakeStore()
+		a := New(client, st, opts)
+
+		reply := send(t, a, 1, "check time for 999")
+		if reply != "Refused." {
+			t.Errorf("got reply %q, want 'Refused.'", reply)
+		}
+
+		req := lastRequest(t, client)
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if !strings.Contains(lastMsg.Content, "invalid arguments") {
+			t.Errorf("expected validation error in tool message, got %q", lastMsg.Content)
+		}
+
+		// Tool call was recorded with status rejected for user 1, none for user 999
+		calls1 := st.ToolCalls(1)
+		if len(calls1) != 1 || calls1[0].Status != store.ToolCallStatusRejected {
+			t.Errorf("expected 1 rejected call for user 1, got %+v", calls1)
+		}
+		calls999 := st.ToolCalls(999)
+		if len(calls999) != 0 {
+			t.Errorf("expected 0 calls for user 999, got %d", len(calls999))
+		}
+	})
+}
+
+type testUserTool struct {
+	onExec func(ctx context.Context)
+}
+
+func (t *testUserTool) Name() string                                 { return "inspect_user" }
+func (t *testUserTool) Description() string                          { return "inspects user" }
+func (t *testUserTool) Schema() json.RawMessage                      { return json.RawMessage(`{"type":"object"}`) }
+func (t *testUserTool) Risk() tools.Risk                             { return tools.RiskRead }
+func (t *testUserTool) Preview(args json.RawMessage) (string, error) { return "", nil }
+func (t *testUserTool) Execute(ctx context.Context, args json.RawMessage) (tools.Result, error) {
+	if t.onExec != nil {
+		t.onExec(ctx)
+	}
+	return tools.Result{Content: "ok"}, nil
 }
