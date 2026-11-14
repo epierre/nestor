@@ -22,6 +22,9 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
       HISTORY_LIMIT: ${HISTORY_LIMIT:-}
       MAX_LOOP_ITERATIONS: ${MAX_LOOP_ITERATIONS:-}
+      ENABLE_DEMO_TOOLS: ${ENABLE_DEMO_TOOLS:-false}
+      APPROVAL_TTL: ${APPROVAL_TTL:-}
+      APPROVAL_STALE_AFTER: ${APPROVAL_STALE_AFTER:-}
     networks:
       - default
       - database
