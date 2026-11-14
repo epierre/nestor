@@ -76,8 +76,14 @@ the socket.
 
 ## Dependencies
 
-- A YAML front matter parser (`gopkg.in/yaml.v3`).
-- `sandboxd`: in-repo Go binary using the Docker Engine API client (`github.com/docker/docker/client`).
+- `gopkg.in/yaml.v3` parses `skills.yaml` and the `SKILL.md` front matter. The standard library
+  has no YAML parser, and a hand-written one would be a larger and riskier parser than this
+  dependency. It is a widely used, pure-Go package with no transitive dependencies.
+- `github.com/docker/docker/client` for `sandboxd` to start, wait on and remove containers. The
+  alternative, shelling out to the `docker` CLI, needs the same socket and adds argument-escaping
+  risk, which the JSON-file argument design exists to avoid. The client is used only inside
+  `sandboxd`, not in the agent.
+- `sandboxd`: in-repo Go binary that holds the Docker socket and exposes one operation.
 
 ## Testing approach
 
