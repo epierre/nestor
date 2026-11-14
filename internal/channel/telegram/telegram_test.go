@@ -646,10 +646,12 @@ func TestEmptyReplySendsNothing(t *testing.T) {
 	}
 }
 
-// fakeDecider records the decisions it is asked to make.
+// fakeDecider records the decisions it is asked to make and answers with result and err.
 type fakeDecider struct {
-	mu    sync.Mutex
-	calls []decideCall
+	mu     sync.Mutex
+	calls  []decideCall
+	result store.PendingAction
+	err    error
 }
 
 type decideCall struct {
@@ -662,7 +664,7 @@ func (d *fakeDecider) Decide(ctx context.Context, user identity.UserID, actionID
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, decideCall{user: user, actionID: actionID, decision: decision})
-	return store.PendingAction{State: store.PendingExecuted}, nil
+	return d.result, d.err
 }
 
 func (d *fakeDecider) made() []decideCall {
@@ -767,5 +769,52 @@ func TestCallbackFromStrangerNeverReachesDecide(t *testing.T) {
 
 	if got := d.made(); len(got) != 0 {
 		t.Errorf("stranger's callback reached Decide: %+v", got)
+	}
+}
+
+func TestOutcomePostedToChat(t *testing.T) {
+	tests := []struct {
+		name     string
+		decision approval.Decision
+		result   store.PendingAction
+		err      error
+		want     string
+	}{
+		{"executed", approval.Approve, store.PendingAction{State: store.PendingExecuted, Preview: "Notify yourself: hi"}, nil,
+			"Done: Notify yourself: hi"},
+		{"rejected", approval.Reject, store.PendingAction{State: store.PendingRejected, Preview: "Notify yourself: hi"}, nil,
+			"Rejected: Notify yourself: hi"},
+		{"expired", approval.Approve, store.PendingAction{State: store.PendingExpired, Preview: "Notify yourself: hi"}, approval.ErrExpired,
+			"Expired, not run: Notify yourself: hi"},
+		{"failed to run", approval.Approve, store.PendingAction{State: store.PendingFailed, Preview: "Notify yourself: hi"}, errors.New("boom"),
+			"Failed: Notify yourself: hi"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newBotAPI(t, callbackUpdate(1, senderID, chatID, string(tt.decision)+":abc123"))
+			c := newChannel(api, knownSender())
+			c.SetDecider(&fakeDecider{result: tt.result, err: tt.err})
+
+			runUntil(t, c, echo(), func() bool { return api.confirmed(1) })
+
+			if got := api.sentTexts(); !reflect.DeepEqual(got, []string{tt.want}) {
+				t.Errorf("chat received %q, want %q", got, tt.want)
+			}
+			if got := api.sent; len(got) == 1 && got[0].ChatID != chatID {
+				t.Errorf("outcome went to chat %d, want %d", got[0].ChatID, chatID)
+			}
+		})
+	}
+}
+
+func TestNoOutcomePostedWhenNoLongerPending(t *testing.T) {
+	api := newBotAPI(t, callbackUpdate(1, senderID, chatID, "approve:abc123"))
+	c := newChannel(api, knownSender())
+	c.SetDecider(&fakeDecider{err: approval.ErrNoPendingAction})
+
+	runUntil(t, c, echo(), func() bool { return api.confirmed(1) })
+
+	if got := api.sentTexts(); len(got) != 0 {
+		t.Errorf("chat received %q for an action that was not pending, want nothing", got)
 	}
 }

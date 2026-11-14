@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/tools"
 )
@@ -31,6 +32,17 @@ var (
 	// ErrOutcomeUnknown is the error of an approved action that was never recorded as executed.
 	// Such an action may or may not have run, so it is failed and never retried.
 	ErrOutcomeUnknown = errors.New("outcome unknown: may or may not have run; not retried")
+)
+
+// Outcome notes are system messages in the user's open conversation, so the model reads each
+// outcome on its next turn. They name the action and its outcome only: never its arguments or its
+// result, which are untrusted content.
+const (
+	noteRejected  = "Pending action %s was rejected by the user. It did not run."
+	noteExecuted  = "Pending action %s was approved and ran."
+	noteExpired   = "Pending action %s expired before the user decided. It did not run."
+	noteIntegrity = "Pending action %s did not run: its stored details no longer matched the proposal."
+	noteFailed    = "Pending action %s was approved but failed while running."
 )
 
 // Decision is the user's answer to a pending action.
@@ -114,31 +126,40 @@ func (g *Gate) Decide(ctx context.Context, user identity.UserID, actionID string
 	now := g.instant()
 
 	if decision == Reject {
-		return g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
+		rejected, err := g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
 			State:     store.PendingRejected,
 			DecidedAt: &now,
 		})
+		if err != nil {
+			return store.PendingAction{}, err
+		}
+		g.note(ctx, user, fmt.Sprintf(noteRejected, rejected.ID))
+		return rejected, nil
 	}
 
 	if !now.Before(action.ExpiresAt) {
-		if _, err := g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
+		expired, err := g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
 			State:     store.PendingExpired,
 			DecidedAt: &now,
-		}); err != nil {
+		})
+		if err != nil {
 			return store.PendingAction{}, err
 		}
-		return store.PendingAction{}, ErrExpired
+		g.note(ctx, user, fmt.Sprintf(noteExpired, expired.ID))
+		return expired, ErrExpired
 	}
 
 	if ArgsHash(user, action.ToolName, action.ArgsJSON) != action.ArgsHash {
-		if _, err := g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
+		failed, err := g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
 			State:     store.PendingFailed,
 			DecidedAt: &now,
 			Error:     ErrIntegrity.Error(),
-		}); err != nil {
+		})
+		if err != nil {
 			return store.PendingAction{}, err
 		}
-		return store.PendingAction{}, ErrIntegrity
+		g.note(ctx, user, fmt.Sprintf(noteIntegrity, failed.ID))
+		return failed, ErrIntegrity
 	}
 
 	// Claiming the action is the step that makes approval happen once: a second approval finds it
@@ -168,11 +189,16 @@ func (g *Gate) run(ctx context.Context, user identity.UserID, action store.Pendi
 		return g.fail(ctx, user, action.ID, fmt.Errorf("encode result of %s: %w", action.ToolName, err))
 	}
 	done := g.instant()
-	return g.move(ctx, user, action.ID, store.PendingApproved, store.PendingUpdate{
+	executed, err := g.move(ctx, user, action.ID, store.PendingApproved, store.PendingUpdate{
 		State:      store.PendingExecuted,
 		ExecutedAt: &done,
 		ResultJSON: resultJSON,
 	})
+	if err != nil {
+		return store.PendingAction{}, err
+	}
+	g.note(ctx, user, fmt.Sprintf(noteExecuted, executed.ID))
+	return executed, nil
 }
 
 // fail marks an approved action failed and returns the cause as the error.
@@ -186,7 +212,20 @@ func (g *Gate) fail(ctx context.Context, user identity.UserID, id string, cause 
 	if err != nil {
 		return store.PendingAction{}, err
 	}
+	g.note(ctx, user, fmt.Sprintf(noteFailed, failed.ID))
 	return failed, cause
+}
+
+// note records an outcome in the user's open conversation. The decision is already final, so a
+// failure to record it is logged rather than returned.
+func (g *Gate) note(ctx context.Context, user identity.UserID, text string) {
+	conv, err := g.store.ActiveConversation(ctx, user)
+	if err == nil {
+		_, err = g.store.AppendMessage(ctx, user, conv.ID, model.RoleSystem, text)
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "outcome not recorded in conversation", "error", err)
+	}
 }
 
 // move changes an action's state from from to update.State and returns the stored action. It

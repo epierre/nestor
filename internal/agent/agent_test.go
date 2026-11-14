@@ -951,6 +951,49 @@ func criticalTurns() *testutil.FakeModel {
 	}}
 }
 
+func TestRejectionVisibleToModelOnNextTurn(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	gate := approval.New(st, reg, time.Hour)
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = gate
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		last := req.Messages[len(req.Messages)-1]
+		switch {
+		case last.Role == model.RoleUser && last.Content == "notify me":
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{{
+				ID: "call_reject", Name: "notify_self", Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+			}}}, nil
+		case last.Role == model.RoleUser:
+			return model.CompletionResponse{Content: "Noted."}, nil
+		}
+		return model.CompletionResponse{Content: "Waiting."}, nil
+	}}
+	a := New(client, st, opts)
+	send(t, a, 1, "notify me")
+	pending := st.PendingActions(1)
+	if len(pending) != 1 {
+		t.Fatalf("got %d pending actions, want 1", len(pending))
+	}
+	if _, err := gate.Decide(identity.WithUser(context.Background(), 1), 1, pending[0].ID, approval.Reject); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	send(t, a, 1, "what happened?")
+
+	var found bool
+	for _, m := range lastRequest(t, client).Messages {
+		if m.Role == model.RoleSystem && strings.Contains(m.Content, pending[0].ID) && strings.Contains(m.Content, "was rejected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the next model request does not say the action was rejected")
+	}
+}
+
 func TestCardShownAfterProposal(t *testing.T) {
 	reg := tools.NewRegistry()
 	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))

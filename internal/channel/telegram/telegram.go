@@ -206,7 +206,34 @@ func (c *Channel) handleCallback(ctx context.Context, q callbackQuery) error {
 		return fmt.Errorf("decide: %w", err)
 	}
 	c.answer(ctx, q.ID, answerText(decision, action, err))
+	if text := outcomeMessage(action, err); text != "" {
+		// The decision is final, so a failed send is logged rather than redelivered: a second
+		// delivery would find the action settled and post nothing.
+		if sendErr := c.Send(ctx, q.Message.Chat.ID, text); sendErr != nil {
+			slog.WarnContext(ctx, "outcome not sent", "error", sendErr)
+		}
+	}
 	return nil
+}
+
+// outcomeMessage is the chat message that reports a settled decision. It is empty when there is
+// nothing to report, as for an action that was no longer pending.
+func outcomeMessage(action store.PendingAction, err error) string {
+	switch {
+	case errors.Is(err, approval.ErrNoPendingAction):
+		return ""
+	case errors.Is(err, approval.ErrIntegrity):
+		return "Not run, its details changed after the proposal: " + action.Preview
+	case action.State == store.PendingExecuted:
+		return "Done: " + action.Preview
+	case action.State == store.PendingRejected:
+		return "Rejected: " + action.Preview
+	case action.State == store.PendingExpired:
+		return "Expired, not run: " + action.Preview
+	case action.State == store.PendingFailed:
+		return "Failed: " + action.Preview
+	}
+	return ""
 }
 
 // settled reports whether a decision reached an outcome that the user can be told about, so the

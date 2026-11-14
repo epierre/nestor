@@ -6,10 +6,12 @@ import (
 	"errors"
 	"math/big"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
@@ -333,5 +335,70 @@ func TestStaleApprovedNeverReExecuted(t *testing.T) {
 	}
 	if h.sends != 0 {
 		t.Errorf("tool ran %d times, want 0", h.sends)
+	}
+}
+
+// systemNotes returns the system messages in the user's open conversation, which is where the
+// model reads outcomes from.
+func (h *harness) systemNotes(t *testing.T, user identity.UserID) []string {
+	t.Helper()
+	ctx := identity.WithUser(context.Background(), user)
+	conv, err := h.st.ActiveConversation(ctx, user)
+	if err != nil {
+		t.Fatalf("ActiveConversation: %v", err)
+	}
+	msgs, err := h.st.RecentMessages(ctx, user, conv.ID, 100)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	var notes []string
+	for _, m := range msgs {
+		if m.Role == model.RoleSystem {
+			notes = append(notes, m.Content)
+		}
+	}
+	return notes
+}
+
+func TestOutcomeRecordedInConversation(t *testing.T) {
+	tests := []struct {
+		name     string
+		run      func(t *testing.T, h *harness, id string)
+		contains string
+	}{
+		{"rejected", func(t *testing.T, h *harness, id string) {
+			if _, err := h.decide(testUser, id, Reject); err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+		}, "was rejected"},
+		{"executed", func(t *testing.T, h *harness, id string) {
+			if _, err := h.decide(testUser, id, Approve); err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+		}, "was approved and ran"},
+		{"expired", func(t *testing.T, h *harness, id string) {
+			h.now = h.now.Add(testTTL + time.Second)
+			if _, err := h.decide(testUser, id, Approve); !errors.Is(err, ErrExpired) {
+				t.Fatalf("Decide: %v, want ErrExpired", err)
+			}
+		}, "expired"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			action := h.propose(t, testUser)
+			tt.run(t, h, action.ID)
+
+			notes := h.systemNotes(t, testUser)
+			if len(notes) != 1 {
+				t.Fatalf("got %d system notes %q, want 1", len(notes), notes)
+			}
+			if !strings.Contains(notes[0], action.ID) || !strings.Contains(notes[0], tt.contains) {
+				t.Errorf("note %q, want the action ID and %q", notes[0], tt.contains)
+			}
+			if strings.Contains(notes[0], "Dentist") {
+				t.Errorf("note %q carries arguments; it must name only the action and outcome", notes[0])
+			}
+		})
 	}
 }
