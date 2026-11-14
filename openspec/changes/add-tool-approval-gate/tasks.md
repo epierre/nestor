@@ -13,7 +13,7 @@
 ## 3. Pending actions
 
 - [x] 3.1 Migration for `pending_actions` with user_id and random IDs; `approval.Propose` stores args, hash over user+tool+args, preview, expiry. Test: integration `approval_store_test.go` "propose stores hash and expiry", "IDs not sequential".
-- [ ] 3.2 Critical tool calls go to `Propose`; model receives "pending approval <id>". Test: `agent_test.go` "critical call becomes pending", "risk claim in args ignored".
+- [x] 3.2 Critical tool calls go to `Propose`; model receives "pending approval <id>". Test: `agent_test.go` "critical call becomes pending", "risk claim in args ignored".
 - [ ] 3.3 `approval.Decide(userID, actionID, decision)` loading the action scoped by user ID, with atomic state transition, expiry check, hash check. Test: `approval_test.go` "approve executes once", "double tap executes once", "expired not executed", "tampered args refused", "other user's approval behaves like unknown action", "stranger callback ignored".
 
 ## 4. Telegram flow

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/epierre/nestor/internal/approval"
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
@@ -831,6 +832,128 @@ func TestToolDispatch(t *testing.T) {
 			t.Errorf("expected ErrCriticalRefusal from agent view, got: %v", execErr)
 		}
 	})
+
+	t.Run("critical call becomes pending", func(t *testing.T) {
+		var executed bool
+		sender := func(ctx context.Context, uid identity.UserID, text string) error {
+			executed = true
+			return nil
+		}
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewNotifySelfTool(sender))
+
+		call := model.ToolCall{
+			ID:        "call_crit",
+			Name:      "notify_self",
+			Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+		}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Waiting for your approval."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		st := testutil.NewFakeStore()
+		opts := testOptions()
+		opts.Tools = reg
+		opts.Approvals = approval.New(st, time.Hour)
+		a := New(client, st, opts)
+
+		reply := send(t, a, 1, "notify me")
+		if reply != "Waiting for your approval." {
+			t.Errorf("got reply %q, want the model's words", reply)
+		}
+		if executed {
+			t.Error("critical tool executed without approval")
+		}
+
+		pending := st.PendingActions(1)
+		if len(pending) != 1 {
+			t.Fatalf("got %d pending actions for user 1, want 1", len(pending))
+		}
+		if got, want := toolResult(t, client, "call_crit"), "pending approval "+pending[0].ID; got != want {
+			t.Errorf("model saw %q, want %q", got, want)
+		}
+
+		calls := st.ToolCalls(1)
+		if len(calls) != 1 {
+			t.Fatalf("got %d tool calls logged, want 1", len(calls))
+		}
+		if calls[0].Status != store.ToolCallStatusProposed || calls[0].Risk != tools.RiskCritical {
+			t.Errorf("logged status %q risk %q, want proposed and critical", calls[0].Status, calls[0].Risk)
+		}
+	})
+
+	t.Run("risk claim in args ignored", func(t *testing.T) {
+		var executed bool
+		reg := tools.NewRegistry()
+		_ = reg.Register(&openCriticalTool{executed: &executed})
+
+		// The schema accepts extra properties, so the claim reaches the dispatcher.
+		call := model.ToolCall{
+			ID:        "call_claim",
+			Name:      "open_critical",
+			Arguments: json.RawMessage(`{"text": "Dentist at 3pm", "risk": "read"}`),
+		}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Waiting."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		st := testutil.NewFakeStore()
+		opts := testOptions()
+		opts.Tools = reg
+		opts.Approvals = approval.New(st, time.Hour)
+		a := New(client, st, opts)
+
+		send(t, a, 1, "do it")
+		if executed {
+			t.Fatal("critical tool executed on the strength of a risk claim")
+		}
+		if n := len(st.PendingActions(1)); n != 1 {
+			t.Fatalf("got %d pending actions, want 1", n)
+		}
+		calls := st.ToolCalls(1)
+		if len(calls) != 1 || calls[0].Risk != tools.RiskCritical || calls[0].Status != store.ToolCallStatusProposed {
+			t.Errorf("logged calls %+v, want one proposed critical call", calls)
+		}
+	})
+}
+
+// toolResult returns the content of the tool message that answers callID in the last request.
+func toolResult(t *testing.T, client *testutil.FakeModel, callID string) string {
+	t.Helper()
+	for _, m := range lastRequest(t, client).Messages {
+		if m.Role == model.RoleTool && m.ToolCallID == callID {
+			return m.Content
+		}
+	}
+	t.Fatalf("no tool result for call %s in the last request", callID)
+	return ""
+}
+
+// openCriticalTool is critical and accepts any arguments.
+type openCriticalTool struct {
+	executed *bool
+}
+
+func (t *openCriticalTool) Name() string        { return "open_critical" }
+func (t *openCriticalTool) Description() string { return "Does something critical." }
+func (t *openCriticalTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type": "object"}`)
+}
+func (t *openCriticalTool) Risk() tools.Risk { return tools.RiskCritical }
+func (t *openCriticalTool) Preview(args json.RawMessage) (string, error) {
+	return "Do something critical", nil
+}
+func (t *openCriticalTool) Execute(ctx context.Context, args json.RawMessage) (tools.Result, error) {
+	*t.executed = true
+	return tools.Result{Content: "done"}, nil
 }
 
 type testUserTool struct {

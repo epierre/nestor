@@ -33,6 +33,11 @@ type ToolRegistry interface {
 	Validate(name string, args json.RawMessage) error
 }
 
+// Approvals holds critical tool calls until their user decides on them. approval.Gate implements it.
+type Approvals interface {
+	Propose(ctx context.Context, user identity.UserID, tool tools.Tool, args json.RawMessage) (store.PendingAction, error)
+}
+
 // Options configures an Agent.
 type Options struct {
 	Model         string // proxy alias
@@ -40,6 +45,8 @@ type Options struct {
 	HistoryLimit  int // messages of the conversation sent to the model
 	MaxIterations int // model calls allowed for one message
 	Tools         ToolRegistry
+	// Approvals takes critical tool calls. Without it, critical calls are refused.
+	Approvals Approvals
 }
 
 // Agent runs the conversation loop for one message at a time.
@@ -211,10 +218,19 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 				status = store.ToolCallStatusRejected
 				errText = valErr.Error()
 				content = tools.MarkData(fmt.Sprintf("error: invalid arguments: %v", valErr))
-			} else if tool.Risk() == tools.RiskCritical {
+			} else if tool.Risk() == tools.RiskCritical && a.opts.Approvals == nil {
 				status = store.ToolCallStatusRejected
 				errText = "critical tool requires approval gate"
 				content = tools.MarkData(fmt.Sprintf("error: critical tool %q requires approval gate", call.Name))
+			} else if tool.Risk() == tools.RiskCritical {
+				// The risk comes from the tool's definition, never from the arguments.
+				action, proposeErr := a.opts.Approvals.Propose(ctx, user, tool, call.Arguments)
+				if proposeErr != nil {
+					return nil, fmt.Errorf("propose action: %w", proposeErr)
+				}
+				status = store.ToolCallStatusProposed
+				content = "pending approval " + action.ID
+				resultJSON, _ = json.Marshal(content)
 			} else {
 				res, execErr := tool.Execute(ctx, call.Arguments)
 				if execErr != nil {
