@@ -10,7 +10,8 @@ approval gate for the first time against user data rather than a demo.
 ## What changes
 
 - Task tools: `task_add` and `task_complete` (reversible), `task_list` (read), `task_delete`
-  (critical: deleting data is approval-gated, as the vision requires).
+  (critical: deleting data is approval-gated, as the vision requires). A task may have an optional
+  due day, given as `YYYY-MM-DD` and read in `TIMEZONE`; `task_list` shows due days and sorts by them.
 - Reminder tools: `reminder_add` (reversible), `reminder_list` (read), `reminder_cancel`
   (critical).
 - A scheduler, running in the entrypoint, that delivers each reminder when it is due: the text is
@@ -43,5 +44,5 @@ approval gate for the first time against user data rather than a demo.
 
 - Recurring reminders and repeating tasks.
 - Linking reminders to tasks.
-- Due dates on tasks (tasks have no date in this change).
+- Due times of day on tasks. A task's due date is a day, and a reminder covers a time.
 - Calendar integration (a later change).

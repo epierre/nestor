@@ -4,8 +4,10 @@
 
 Migration `0006_tasks_reminders`:
 
-- `tasks(id, user_id, title, created_at, done_at)`. `done_at` is set by `task_complete`. A deleted
-  task is removed; the approval record of the deletion remains in `pending_actions`.
+- `tasks(id, user_id, title, due_date, created_at, done_at)`. `due_date` is a calendar day, null when
+  the task has none; it is stored as a `date`, so no time zone is attached to it. `done_at` is set by
+  `task_complete`. A deleted task is removed; the approval record of the deletion remains in
+  `pending_actions`.
 - `reminders(id, user_id, text, due_at, chat_id, created_at, delivered_at, cancelled_at)`.
   `chat_id` is the chat the reminder was created in (from the request context, as for card chats).
   A cancelled reminder is kept with `cancelled_at` set and is never delivered.
@@ -17,8 +19,8 @@ reference their user as the existing tables do.
 
 | Tool | Risk | Arguments | Effect |
 |---|---|---|---|
-| `task_add` | reversible | `title` (1–200 chars) | inserts a task |
-| `task_list` | read | `include_done` (bool, default false) | returns open tasks with IDs |
+| `task_add` | reversible | `title` (1–200 chars), `due` (optional `YYYY-MM-DD`, read in `TIMEZONE`) | inserts a task |
+| `task_list` | read | `include_done` (bool, default false) | returns open tasks with IDs and due days, earliest due first, undated last |
 | `task_complete` | reversible | `id` | sets `done_at` on the user's own task |
 | `task_delete` | critical | `id` | deletes the user's own task after approval |
 | `reminder_add` | reversible | `text`, `due` (RFC 3339 with offset, or local time read in `TIMEZONE`) | inserts a reminder with the current chat |
@@ -27,6 +29,8 @@ reference their user as the existing tables do.
 
 The model never supplies a user ID. Every lookup by `id` filters on the user in the context, so an
 ID that belongs to someone else behaves like an unknown ID.
+
+A `due` that is not a valid calendar day is refused with an error result the model can read.
 
 `task_delete` and `reminder_cancel` pass through `approval.Gate.Propose`. The preview names the
 task title or reminder text and due time, read from the stored row, so the owner sees what will be

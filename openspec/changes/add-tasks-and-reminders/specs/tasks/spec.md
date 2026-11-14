@@ -19,6 +19,14 @@ The system SHALL let the model add a task with a title of 1 to 200 characters, l
 - **WHEN** the model adds a task "Renew passport" and then lists open tasks
 - **THEN** the list includes "Renew passport" with its ID
 
+#### Scenario: Due day stored and listed
+- **WHEN** the model adds "Renew passport" due "2026-12-01" and then lists open tasks
+- **THEN** the task is listed with due day 2026-12-01, and tasks without a due day come after the dated ones
+
+#### Scenario: Invalid due day refused
+- **WHEN** the model adds a task with the due day "2026-02-30"
+- **THEN** no task is created and the model receives an error result
+
 #### Scenario: Complete hides the task
 - **WHEN** the user's task is completed and open tasks are listed
 - **THEN** the task is absent from the list, and present when done tasks are requested
