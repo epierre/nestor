@@ -1246,3 +1246,135 @@ func TestPendingCardsResentOnNextMessage(t *testing.T) {
 		t.Error("card delivered but not marked as sent")
 	}
 }
+
+// recordingNotices records the outcome notices sent to chats, and fails the first failures calls.
+type recordingNotices struct {
+	sent     []notice
+	failures int
+}
+
+type notice struct {
+	chat int64
+	text string
+}
+
+func (r *recordingNotices) Notify(_ context.Context, chatID int64, text string) error {
+	if r.failures > 0 {
+		r.failures--
+		return errors.New("telegram down")
+	}
+	r.sent = append(r.sent, notice{chat: chatID, text: text})
+	return nil
+}
+
+// proposingModel asks for one notify_self proposal on "notify me", and answers plainly otherwise.
+func proposingModel() *testutil.FakeModel {
+	return &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		last := req.Messages[len(req.Messages)-1]
+		switch {
+		case last.Role == model.RoleUser && last.Content == "notify me":
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{{
+				ID: "call_chat", Name: "notify_self", Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+			}}}, nil
+		case last.Role == model.RoleUser:
+			return model.CompletionResponse{Content: "ok"}, nil
+		}
+		return model.CompletionResponse{Content: "Waiting."}, nil
+	}}
+}
+
+// sendInChat handles text from user as if it arrived in chat, which is how the channel calls us.
+func sendInChat(t *testing.T, a *Agent, user identity.UserID, chat int64, text string) {
+	t.Helper()
+	ctx := channel.WithChat(identity.WithUser(context.Background(), user), chat)
+	if _, err := a.HandleMessage(ctx, text); err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+}
+
+func TestCardChatRecordedOnDelivery(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = &recordingCards{}
+	a := New(proposingModel(), st, opts)
+
+	sendInChat(t, a, 1, 900, "notify me")
+
+	pending := st.PendingActions(1)
+	if len(pending) != 1 || pending[0].NotifyChatID != 900 {
+		t.Errorf("pending %+v, want the card's chat 900 recorded", pending)
+	}
+}
+
+func TestOutcomeNoticeResentOnNextMessage(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = &recordingCards{}
+	notices := &recordingNotices{failures: 1}
+	opts.Notices = notices
+	a := New(proposingModel(), st, opts)
+
+	// The action is approved and stalls before its outcome; the sweep fails it and cannot notify
+	// yet, because no notifier is wired into that sweep.
+	sendInChat(t, a, 1, 900, "notify me")
+	pending := st.PendingActions(1)
+	stalled := pending[0].ID
+	if _, err := st.UpdatePendingAction(identity.WithUser(context.Background(), 1), 1, stalled, store.PendingProposed,
+		store.PendingUpdate{State: store.PendingApproved, DecidedAt: &[]time.Time{time.Now().Add(-time.Hour)}[0]}); err != nil {
+		t.Fatalf("stall: %v", err)
+	}
+	if _, err := approval.SweepStale(context.Background(), st, nil, time.Now(), 5*time.Minute); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+
+	// The next message retries the notice, which fails once and then succeeds on the following message.
+	sendInChat(t, a, 1, 900, "hello")
+	if len(notices.sent) != 0 {
+		t.Fatalf("notice sent despite the failure: %+v", notices.sent)
+	}
+	sendInChat(t, a, 1, 900, "hello again")
+	if len(notices.sent) != 1 || notices.sent[0].chat != 900 || !strings.Contains(notices.sent[0].text, "Notify yourself: Dentist at 3pm") {
+		t.Fatalf("notices %+v, want one for the stalled action in chat 900", notices.sent)
+	}
+	sendInChat(t, a, 1, 900, "and again")
+	if len(notices.sent) != 1 {
+		t.Errorf("notice repeated after delivery: %+v", notices.sent)
+	}
+}
+
+func TestNoticeNotShownToAnotherUser(t *testing.T) {
+	reg := tools.NewRegistry()
+	st := testutil.NewFakeStore()
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	notices := &recordingNotices{}
+	opts.Notices = notices
+	a := New(proposingModel(), st, opts)
+
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	sendInChat(t, a, 1, 900, "notify me")
+	stalled := st.PendingActions(1)[0].ID
+	if _, err := st.UpdatePendingAction(identity.WithUser(context.Background(), 1), 1, stalled, store.PendingProposed,
+		store.PendingUpdate{State: store.PendingApproved, DecidedAt: &[]time.Time{time.Now().Add(-time.Hour)}[0]}); err != nil {
+		t.Fatalf("stall: %v", err)
+	}
+	if _, err := approval.SweepStale(context.Background(), st, nil, time.Now(), 5*time.Minute); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+
+	sendInChat(t, a, 2, 901, "hello from someone else")
+	for _, n := range notices.sent {
+		if n.chat == 900 || strings.Contains(n.text, "Dentist") {
+			t.Errorf("another user received the owner's notice: %+v", n)
+		}
+	}
+}

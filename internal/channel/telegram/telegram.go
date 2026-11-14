@@ -156,7 +156,7 @@ func (c *Channel) handle(ctx context.Context, h channel.Handler, u update) error
 		return fmt.Errorf("resolve sender: %w", err)
 	}
 
-	ctx = withChat(identity.WithUser(ctx, user), m.Chat.ID)
+	ctx = channel.WithChat(identity.WithUser(ctx, user), m.Chat.ID)
 	slog.InfoContext(ctx, "message received")
 
 	reply := noticeTextOnly
@@ -194,7 +194,7 @@ func (c *Channel) handleCallback(ctx context.Context, q callbackQuery) error {
 	if err != nil {
 		return fmt.Errorf("resolve sender: %w", err)
 	}
-	ctx = withChat(identity.WithUser(ctx, user), q.Message.Chat.ID)
+	ctx = channel.WithChat(identity.WithUser(ctx, user), q.Message.Chat.ID)
 
 	decision, actionID, ok := parseCallback(q.Data)
 	if !ok || c.decider == nil {
@@ -281,7 +281,7 @@ func parseCallback(data string) (approval.Decision, string, bool) {
 // buttons. The chat is the one the action's user is talking in, so the card reaches that user
 // only. It tries once: the action stays pending, and its card is re-sent later if this fails.
 func (c *Channel) SendApprovalCard(ctx context.Context, action store.PendingAction) error {
-	chatID, ok := chatFrom(ctx)
+	chatID, ok := channel.ChatFrom(ctx)
 	if !ok {
 		return errors.New("approval card: no chat in context")
 	}
@@ -305,6 +305,17 @@ func (c *Channel) SendApprovalCard(ctx context.Context, action store.PendingActi
 	return nil
 }
 
+// Notify sends text to chatID in one attempt, for notices that must not hold up their caller. A
+// failure is returned, and the caller decides whether to send the notice again later.
+func (c *Channel) Notify(ctx context.Context, chatID int64, text string) error {
+	sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+	if err := c.do(sendCtx, "sendMessage", sendMessageRequest{ChatID: chatID, Text: text}, nil); err != nil {
+		return fmt.Errorf("send notice: %w", err)
+	}
+	return nil
+}
+
 // answer dismisses the button's loading state with text. A failure is logged, since the press
 // itself has already been handled.
 func (c *Channel) answer(ctx context.Context, queryID, text string) {
@@ -313,18 +324,6 @@ func (c *Channel) answer(ctx context.Context, queryID, text string) {
 	if err := c.do(sendCtx, "answerCallbackQuery", answerCallbackRequest{CallbackQueryID: queryID, Text: text}, nil); err != nil {
 		slog.WarnContext(ctx, "callback answer not sent", "error", err)
 	}
-}
-
-type chatKey struct{}
-
-// withChat returns a copy of ctx carrying the chat that the current update came from.
-func withChat(ctx context.Context, chatID int64) context.Context {
-	return context.WithValue(ctx, chatKey{}, chatID)
-}
-
-func chatFrom(ctx context.Context) (int64, bool) {
-	id, ok := ctx.Value(chatKey{}).(int64)
-	return id, ok
 }
 
 // Send delivers text to the chat in consecutive messages within Telegram's size limit, retrying

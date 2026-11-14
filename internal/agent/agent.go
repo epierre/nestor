@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/epierre/nestor/internal/approval"
+	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store"
@@ -55,6 +57,9 @@ type Options struct {
 	Approvals Approvals
 	// Cards shows each proposed action to its user. Without it, proposed actions have no card.
 	Cards CardSender
+	// Notices delivers outcome-unknown notices that were not delivered when first due. Without it,
+	// they are not sent again.
+	Notices approval.Notifier
 }
 
 // Agent runs the conversation loop for one message at a time.
@@ -282,8 +287,8 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 	return messages, nil
 }
 
-// showCard sends the action's card and records the delivery. A failure is logged and does not
-// fail the message: the card is sent again on the user's next message.
+// showCard sends the action's card and records the delivery and its chat. A failure is logged and
+// does not fail the message: the card is sent again on the user's next message.
 func (a *Agent) showCard(ctx context.Context, user identity.UserID, action store.PendingAction) {
 	if a.opts.Cards == nil {
 		return
@@ -292,13 +297,16 @@ func (a *Agent) showCard(ctx context.Context, user identity.UserID, action store
 		slog.WarnContext(ctx, "approval card not sent", "action_id", action.ID, "error", err)
 		return
 	}
-	if err := a.store.MarkCardSent(ctx, user, action.ID, time.Now()); err != nil {
+	chatID, _ := channel.ChatFrom(ctx)
+	if err := a.store.MarkCardSent(ctx, user, action.ID, chatID, time.Now()); err != nil {
 		slog.WarnContext(ctx, "approval card delivery not recorded", "action_id", action.ID, "error", err)
 	}
 }
 
-// resendCards shows again the cards of the user's pending actions that were never delivered.
+// resendCards shows again the cards of the user's pending actions that were never delivered, and
+// sends again the outcome notices that were never delivered.
 func (a *Agent) resendCards(ctx context.Context, user identity.UserID) {
+	a.resendOutcomeNotices(ctx, user)
 	if a.opts.Cards == nil {
 		return
 	}
@@ -309,6 +317,22 @@ func (a *Agent) resendCards(ctx context.Context, user identity.UserID) {
 	}
 	for _, action := range unsent {
 		a.showCard(ctx, user, action)
+	}
+}
+
+// resendOutcomeNotices sends the user's undelivered outcome-unknown notices, to the chat each card
+// went to.
+func (a *Agent) resendOutcomeNotices(ctx context.Context, user identity.UserID) {
+	if a.opts.Notices == nil {
+		return
+	}
+	waiting, err := a.store.UnnotifiedOutcomes(ctx, user)
+	if err != nil {
+		slog.WarnContext(ctx, "unnotified outcomes not listed", "error", err)
+		return
+	}
+	for _, action := range waiting {
+		approval.SendOutcomeNotice(ctx, a.store, a.opts.Notices, action)
 	}
 }
 

@@ -411,7 +411,7 @@ func (s *FakeStore) SupersedePending(ctx context.Context, user identity.UserID, 
 }
 
 // MarkCardSent implements store.Store.
-func (s *FakeStore) MarkCardSent(ctx context.Context, user identity.UserID, id string, at time.Time) error {
+func (s *FakeStore) MarkCardSent(ctx context.Context, user identity.UserID, id string, chatID int64, at time.Time) error {
 	if err := store.RequireUser(ctx, user); err != nil {
 		return err
 	}
@@ -422,7 +422,39 @@ func (s *FakeStore) MarkCardSent(ctx context.Context, user identity.UserID, id s
 		return store.ErrActionNotFound
 	}
 	s.actions[i].CardSentAt = &at
+	s.actions[i].NotifyChatID = chatID
 	return nil
+}
+
+// MarkOutcomeNoticed implements store.Store.
+func (s *FakeStore) MarkOutcomeNoticed(ctx context.Context, user identity.UserID, id string, at time.Time) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.actionIndex(user, id)
+	if i < 0 {
+		return store.ErrActionNotFound
+	}
+	s.actions[i].OutcomeNoticeSentAt = &at
+	return nil
+}
+
+// UnnotifiedOutcomes implements store.Store.
+func (s *FakeStore) UnnotifiedOutcomes(ctx context.Context, user identity.UserID) ([]store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []store.PendingAction
+	for _, a := range s.actions {
+		if a.UserID == user && a.State == store.PendingFailed && a.Error == store.OutcomeUnknownError && a.OutcomeNoticeSentAt == nil {
+			found = append(found, a)
+		}
+	}
+	return found, nil
 }
 
 // UnsentCards implements store.Store.
@@ -452,17 +484,17 @@ func (s *FakeStore) actionIndex(user identity.UserID, id string) int {
 }
 
 // FailStaleApprovals implements store.Store.
-func (s *FakeStore) FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error) {
+func (s *FakeStore) FailStaleApprovals(ctx context.Context, cutoff time.Time) ([]store.FailedApproval, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var n int64
+	var failed []store.FailedApproval
 	for i := range s.actions {
 		a := &s.actions[i]
 		if a.State == store.PendingApproved && a.DecidedAt != nil && a.DecidedAt.Before(cutoff) {
 			a.State = store.PendingFailed
-			a.Error = message
-			n++
+			a.Error = store.OutcomeUnknownError
+			failed = append(failed, store.FailedApproval{ID: a.ID, UserID: a.UserID, Preview: a.Preview, ChatID: a.NotifyChatID})
 		}
 	}
-	return n, nil
+	return failed, nil
 }

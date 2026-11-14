@@ -676,7 +676,7 @@ func (d *fakeDecider) made() []decideCall {
 func TestApprovalCardContainsPreviewAndButtons(t *testing.T) {
 	api := newBotAPI(t)
 	c := newChannel(api, knownSender())
-	ctx := withChat(context.Background(), chatID)
+	ctx := channel.WithChat(context.Background(), chatID)
 
 	err := c.SendApprovalCard(ctx, store.PendingAction{ID: "abc123", Preview: "Notify yourself: Dentist at 3pm"})
 	if err != nil {
@@ -816,5 +816,31 @@ func TestNoOutcomePostedWhenNoLongerPending(t *testing.T) {
 
 	if got := api.sentTexts(); len(got) != 0 {
 		t.Errorf("chat received %q for an action that was not pending, want nothing", got)
+	}
+}
+
+func TestNotifyDeliversOnceWithoutRetry(t *testing.T) {
+	api := newBotAPI(t)
+	api.failSends = 2
+	api.sendCode = http.StatusInternalServerError
+	c := newChannel(api, knownSender())
+
+	if err := c.Notify(context.Background(), chatID, "Outcome unknown."); err == nil {
+		t.Fatal("Notify succeeded against a failing API")
+	}
+	if api.failSends != 1 {
+		t.Errorf("failing sends left %d, want 1: Notify must make one attempt", api.failSends)
+	}
+}
+
+func TestNotifyDeliversToChat(t *testing.T) {
+	api := newBotAPI(t)
+	c := newChannel(api, knownSender())
+
+	if err := c.Notify(context.Background(), chatID, "Outcome unknown."); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if got := api.sentTexts(); !reflect.DeepEqual(got, []string{"Outcome unknown."}) || api.sent[0].ChatID != chatID {
+		t.Errorf("sent %+v, want the notice in chat %d", api.sent, chatID)
 	}
 }

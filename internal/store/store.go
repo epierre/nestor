@@ -101,6 +101,10 @@ const (
 	PendingSuperseded = "superseded"
 )
 
+// OutcomeUnknownError is the error of an approved action that was never recorded as executed. Such
+// an action may or may not have run, so it is failed and never retried.
+const OutcomeUnknownError = "outcome unknown: may or may not have run; not retried"
+
 // ErrActionNotFound is returned when a pending action does not exist or belongs to another user.
 // The two are not told apart.
 var ErrActionNotFound = errors.New("pending action not found")
@@ -123,6 +127,18 @@ type PendingAction struct {
 	Error        string
 	SupersededBy string     // set when a replacement for this action was proposed
 	CardSentAt   *time.Time // nil until its approval card was delivered
+	// NotifyChatID is the chat the card went to, where notices for this action are sent. 0 when
+	// none was recorded.
+	NotifyChatID        int64
+	OutcomeNoticeSentAt *time.Time // nil until the outcome-unknown notice was delivered
+}
+
+// FailedApproval is an approved action that the sweep marked failed as outcome unknown.
+type FailedApproval struct {
+	ID      string
+	UserID  identity.UserID
+	Preview string
+	ChatID  int64 // 0 when no card chat was recorded
 }
 
 // PendingUpdate sets the fields that a decision changes. A nil time leaves the stored one alone.
@@ -153,15 +169,20 @@ type Store interface {
 	// UpdatePendingAction applies update only while the user's action is in state from. It
 	// reports false when it is in another state, which is how a repeated decision loses the race.
 	UpdatePendingAction(ctx context.Context, user identity.UserID, id, from string, update PendingUpdate) (bool, error)
-	// FailStaleApprovals marks every action approved before cutoff as failed with message, for
-	// all users, and returns how many it changed. It is the one method without a user ID: it reads
-	// no user data and changes only approved rows past cutoff.
-	FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error)
+	// FailStaleApprovals marks every action approved before cutoff as failed as outcome unknown,
+	// for all users, and returns those actions. It is the one method without a user ID: it reads
+	// no user data beyond what the returned rows carry, and changes only approved rows past cutoff.
+	FailStaleApprovals(ctx context.Context, cutoff time.Time) ([]FailedApproval, error)
+	// UnnotifiedOutcomes returns the user's actions failed as outcome unknown whose notice was not
+	// delivered yet.
+	UnnotifiedOutcomes(ctx context.Context, user identity.UserID) ([]PendingAction, error)
+	// MarkOutcomeNoticed records that the outcome-unknown notice for the action was delivered.
+	MarkOutcomeNoticed(ctx context.Context, user identity.UserID, id string, at time.Time) error
 	// SupersedePending marks the user's other proposed actions for tool as superseded by keepID,
 	// and returns how many it changed.
 	SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error)
-	// MarkCardSent records that the action's card was delivered.
-	MarkCardSent(ctx context.Context, user identity.UserID, id string, at time.Time) error
+	// MarkCardSent records that the action's card was delivered, to chatID.
+	MarkCardSent(ctx context.Context, user identity.UserID, id string, chatID int64, at time.Time) error
 	// UnsentCards returns the user's proposed, unexpired actions whose cards were not delivered.
 	UnsentCards(ctx context.Context, user identity.UserID, now time.Time) ([]PendingAction, error)
 }

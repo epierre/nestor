@@ -181,7 +181,7 @@ func TestFailStaleApprovalsTouchesOnlyStaleApproved(t *testing.T) {
 	approve(ctxA, a, freshA.ID, now)
 	approve(ctxB, b, staleB.ID, old)
 
-	n, err := approval.SweepStale(context.Background(), st, now, 5*time.Minute)
+	n, err := approval.SweepStale(context.Background(), st, nil, now, 5*time.Minute)
 	if err != nil {
 		t.Fatalf("SweepStale: %v", err)
 	}
@@ -243,7 +243,106 @@ func TestSupersedeAndCardRetryAreScopedToUser(t *testing.T) {
 	if len(unsent) != 1 || unsent[0].ID != second.ID {
 		t.Errorf("A's unsent cards %+v, want only the replacement", unsent)
 	}
-	if err := st.MarkCardSent(ctxB, b, second.ID, time.Now()); !errors.Is(err, store.ErrActionNotFound) {
+	if err := st.MarkCardSent(ctxB, b, second.ID, 0, time.Now()); !errors.Is(err, store.ErrActionNotFound) {
 		t.Errorf("marking A's card as B: err = %v, want ErrActionNotFound", err)
+	}
+}
+
+func TestCardDeliveryRecordsChat(t *testing.T) {
+	st, _, a, _, ctxA, _ := twoScoped(t)
+	tool := tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil })
+	action, err := approval.New(st, tools.NewRegistry(), time.Hour).Propose(ctxA, a, tool, json.RawMessage(`{"text": "hi"}`))
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+
+	if err := st.MarkCardSent(ctxA, a, action.ID, 555, time.Now()); err != nil {
+		t.Fatalf("MarkCardSent: %v", err)
+	}
+	got, err := st.GetPendingAction(ctxA, a, action.ID)
+	if err != nil {
+		t.Fatalf("GetPendingAction: %v", err)
+	}
+	if got.NotifyChatID != 555 || got.CardSentAt == nil {
+		t.Errorf("chat %d card sent %v, want chat 555 and a delivery time", got.NotifyChatID, got.CardSentAt)
+	}
+}
+
+// staleApprovals proposes one approved row per user, decided an hour ago, each in a chat of its own.
+func staleApprovals(t *testing.T, st *Store, a, b identity.UserID, ctxA, ctxB context.Context) (previewA, previewB string, idA, idB string) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	mk := func(ctx context.Context, user identity.UserID, id, preview string, chat int64) {
+		action := store.PendingAction{
+			ID: id, ToolName: "tool_" + id, ArgsJSON: json.RawMessage(`{}`), ArgsHash: "unused",
+			Preview: preview, State: store.PendingProposed, CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		}
+		if err := st.ProposeAction(ctx, user, action); err != nil {
+			t.Fatalf("ProposeAction: %v", err)
+		}
+		if err := st.MarkCardSent(ctx, user, id, chat, now); err != nil {
+			t.Fatalf("MarkCardSent: %v", err)
+		}
+		decided := now.Add(-time.Hour)
+		if ok, err := st.UpdatePendingAction(ctx, user, id, store.PendingProposed,
+			store.PendingUpdate{State: store.PendingApproved, DecidedAt: &decided}); err != nil || !ok {
+			t.Fatalf("approve %s: ok=%v err=%v", id, ok, err)
+		}
+	}
+	mk(ctxA, a, "stale-a", "Dentist at 3pm", 501)
+	mk(ctxB, b, "stale-b", "Gym at 7am", 502)
+	return "Dentist at 3pm", "Gym at 7am", "stale-a", "stale-b"
+}
+
+func TestSweepReturnsStaleRowsWithTheirOwnChats(t *testing.T) {
+	st, _, a, b, ctxA, ctxB := twoScoped(t)
+	staleApprovals(t, st, a, b, ctxA, ctxB)
+
+	failed, err := st.FailStaleApprovals(context.Background(), time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("FailStaleApprovals: %v", err)
+	}
+	want := map[string]store.FailedApproval{
+		"stale-a": {ID: "stale-a", UserID: a, Preview: "Dentist at 3pm", ChatID: 501},
+		"stale-b": {ID: "stale-b", UserID: b, Preview: "Gym at 7am", ChatID: 502},
+	}
+	if len(failed) != len(want) {
+		t.Fatalf("got %d failed approvals, want %d: %+v", len(failed), len(want), failed)
+	}
+	for _, f := range failed {
+		if w, ok := want[f.ID]; !ok || f != w {
+			t.Errorf("failed approval %+v, want %+v", f, want[f.ID])
+		}
+	}
+}
+
+func TestUnnotifiedOutcomesPerUserUntilMarked(t *testing.T) {
+	st, _, a, b, ctxA, ctxB := twoScoped(t)
+	staleApprovals(t, st, a, b, ctxA, ctxB)
+	if _, err := st.FailStaleApprovals(context.Background(), time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("FailStaleApprovals: %v", err)
+	}
+
+	listA, err := st.UnnotifiedOutcomes(ctxA, a)
+	if err != nil {
+		t.Fatalf("UnnotifiedOutcomes A: %v", err)
+	}
+	if len(listA) != 1 || listA[0].ID != "stale-a" || listA[0].NotifyChatID != 501 {
+		t.Errorf("A's unnotified outcomes %+v, want only stale-a in chat 501", listA)
+	}
+	listB, _ := st.UnnotifiedOutcomes(ctxB, b)
+	if len(listB) != 1 || listB[0].ID != "stale-b" {
+		t.Errorf("B's unnotified outcomes %+v, want only stale-b", listB)
+	}
+
+	if err := st.MarkOutcomeNoticed(ctxA, a, "stale-a", time.Now()); err != nil {
+		t.Fatalf("MarkOutcomeNoticed: %v", err)
+	}
+	listA, _ = st.UnnotifiedOutcomes(ctxA, a)
+	if len(listA) != 0 {
+		t.Errorf("A's outcomes after marking %+v, want none", listA)
+	}
+	if err := st.MarkOutcomeNoticed(ctxB, b, "stale-a", time.Now()); !errors.Is(err, store.ErrActionNotFound) {
+		t.Errorf("B marking A's outcome: err = %v, want ErrActionNotFound", err)
 	}
 }

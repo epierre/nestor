@@ -51,12 +51,11 @@ func run() error {
 		return err
 	}
 
-	// Stale approvals are failed at startup and then every stale-after interval, so none stays
-	// approved for longer than about two intervals.
-	go approval.RunSweeps(ctx, st, cfg.ApprovalStaleAfter, cfg.ApprovalStaleAfter)
-
 	client := model.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey)
 	bot := telegram.New(cfg.TelegramBotToken, st)
+	// Stale approvals are failed at startup and then every stale-after interval, so none stays
+	// approved for longer than about two intervals. The owner is told through the bot.
+	go approval.RunSweeps(ctx, st, bot, cfg.ApprovalStaleAfter, cfg.ApprovalStaleAfter)
 	// No tools are registered yet, so the gate can only decide actions the agent proposes, and it
 	// proposes none. The wiring is in place for when critical tools arrive.
 	gate := approval.New(st, tools.NewRegistry(), cfg.ApprovalTTL)
@@ -64,6 +63,7 @@ func run() error {
 	opts := agentOptions(cfg)
 	opts.Approvals = gate
 	opts.Cards = bot
+	opts.Notices = bot
 	assistant := agent.New(client, st, opts)
 
 	slog.Info("nestor started", "model", cfg.LLMModel, "allowed_users", len(cfg.AllowedTelegramUsers))

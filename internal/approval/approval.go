@@ -31,8 +31,13 @@ var (
 	ErrIntegrity = errors.New("pending action arguments changed after proposal")
 	// ErrOutcomeUnknown is the error of an approved action that was never recorded as executed.
 	// Such an action may or may not have run, so it is failed and never retried.
-	ErrOutcomeUnknown = errors.New("outcome unknown: may or may not have run; not retried")
+	ErrOutcomeUnknown = errors.New(store.OutcomeUnknownError)
 )
+
+// Notifier sends a message to a chat. The Telegram channel implements it.
+type Notifier interface {
+	Notify(ctx context.Context, chatID int64, text string) error
+}
 
 // Outcome notes are system messages in the user's open conversation, so the model reads each
 // outcome on its next turn. They name the action and its outcome only: never its arguments or its
@@ -43,7 +48,14 @@ const (
 	noteExpired   = "Pending action %s expired before the user decided. It did not run."
 	noteIntegrity = "Pending action %s did not run: its stored details no longer matched the proposal."
 	noteFailed    = "Pending action %s was approved but failed while running."
+	noteUnknown   = "Pending action %s may or may not have run. Its outcome is unknown, and it will not be retried."
 )
+
+// OutcomeNoticeText is the chat message for an action whose outcome is unknown. It names the
+// preview the owner was shown, and nothing else.
+func OutcomeNoticeText(preview string) string {
+	return "Outcome unknown, not run again: " + preview + "\nIt may or may not have run. Nothing will be retried."
+}
 
 // Decision is the user's answer to a pending action.
 type Decision string
@@ -221,12 +233,17 @@ func (g *Gate) fail(ctx context.Context, user identity.UserID, id string, cause 
 	return failed, cause
 }
 
-// note records an outcome in the user's open conversation. The decision is already final, so a
-// failure to record it is logged rather than returned.
+// note records an outcome in the user's open conversation.
 func (g *Gate) note(ctx context.Context, user identity.UserID, text string) {
-	conv, err := g.store.ActiveConversation(ctx, user)
+	recordNote(ctx, g.store, user, text)
+}
+
+// recordNote appends an outcome to the user's open conversation, so the model reads it on its next
+// turn. The decision is already final, so a failure to record it is logged rather than returned.
+func recordNote(ctx context.Context, st store.Store, user identity.UserID, text string) {
+	conv, err := st.ActiveConversation(ctx, user)
 	if err == nil {
-		_, err = g.store.AppendMessage(ctx, user, conv.ID, model.RoleSystem, text)
+		_, err = st.AppendMessage(ctx, user, conv.ID, model.RoleSystem, text)
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "outcome not recorded in conversation", "error", err)
@@ -257,22 +274,51 @@ func (g *Gate) instant() time.Time {
 }
 
 // SweepStale fails every action approved more than staleAfter before now, for all users, and
-// returns how many it failed. A failed action is never executed again.
-func SweepStale(ctx context.Context, st store.Store, now time.Time, staleAfter time.Duration) (int64, error) {
-	n, err := st.FailStaleApprovals(ctx, now.Add(-staleAfter), ErrOutcomeUnknown.Error())
+// returns how many it failed. For each one, the owner's conversation records that the outcome is
+// unknown, and the owner is told in the card's chat through out. A nil out sends no notices. A
+// failed action is never executed again.
+func SweepStale(ctx context.Context, st store.Store, out Notifier, now time.Time, staleAfter time.Duration) (int64, error) {
+	failed, err := st.FailStaleApprovals(ctx, now.Add(-staleAfter))
 	if err != nil {
 		return 0, fmt.Errorf("sweep stale approvals: %w", err)
 	}
-	return n, nil
+	for _, f := range failed {
+		owner := identity.WithUser(ctx, f.UserID)
+		recordNote(owner, st, f.UserID, fmt.Sprintf(noteUnknown, f.ID))
+		SendOutcomeNotice(owner, st, out, store.PendingAction{
+			ID: f.ID, UserID: f.UserID, Preview: f.Preview, NotifyChatID: f.ChatID,
+		})
+	}
+	return int64(len(failed)), nil
+}
+
+// SendOutcomeNotice tells the owner of an action whose outcome is unknown, in the chat its card
+// went to. The notice is marked delivered only once it was sent. A failure is logged, and the
+// notice stays pending so that it is sent again on the owner's next message.
+func SendOutcomeNotice(ctx context.Context, st store.Store, out Notifier, action store.PendingAction) {
+	if out == nil {
+		return
+	}
+	if action.NotifyChatID == 0 {
+		slog.WarnContext(ctx, "outcome notice has no chat; conversation note only", "action_id", action.ID)
+		return
+	}
+	if err := out.Notify(ctx, action.NotifyChatID, OutcomeNoticeText(action.Preview)); err != nil {
+		slog.WarnContext(ctx, "outcome notice not sent; retried on next message", "action_id", action.ID, "error", err)
+		return
+	}
+	if err := st.MarkOutcomeNoticed(ctx, action.UserID, action.ID, time.Now()); err != nil {
+		slog.ErrorContext(ctx, "outcome notice delivered but not recorded", "action_id", action.ID, "error", err)
+	}
 }
 
 // RunSweeps runs SweepStale now and then every interval until ctx is done. A failed sweep is logged
 // and tried again at the next interval.
-func RunSweeps(ctx context.Context, st store.Store, staleAfter, every time.Duration) {
+func RunSweeps(ctx context.Context, st store.Store, out Notifier, staleAfter, every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
-		n, err := SweepStale(ctx, st, time.Now(), staleAfter)
+		n, err := SweepStale(ctx, st, out, time.Now(), staleAfter)
 		switch {
 		case err != nil && ctx.Err() == nil:
 			slog.ErrorContext(ctx, "approval sweep failed", "error", err)
