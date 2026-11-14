@@ -29,5 +29,5 @@
 ## 6. Observability and wrap-up
 
 - [x] 6.1 slog JSON handler with request ID and user ID propagation via context. Test: `obs_test.go` "log lines share request ID and user ID".
-- [ ] 6.2 README: setup, env vars, how to query the call log. Test: manual smoke checklist in README executed once on the N100.
+- [x] 6.2 README: setup, env vars, how to query the call log. Test: manual smoke checklist in README executed once on the N100.
 - [x] 6.3 Run `openspec validate add-chat-foundation --strict` and `go test ./...` green.
