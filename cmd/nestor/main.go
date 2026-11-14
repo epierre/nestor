@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/epierre/nestor/internal/agent"
 	"github.com/epierre/nestor/internal/approval"
+	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/channel/telegram"
 	"github.com/epierre/nestor/internal/config"
+	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store/postgres"
@@ -56,11 +59,10 @@ func run() error {
 	// Stale approvals are failed at startup and then every stale-after interval, so none stays
 	// approved for longer than about two intervals. The owner is told through the bot.
 	go approval.RunSweeps(ctx, st, bot, cfg.ApprovalStaleAfter, cfg.ApprovalStaleAfter)
-	// No tools are registered yet, so the gate can only decide actions the agent proposes, and it
-	// proposes none. The wiring is in place for when critical tools arrive.
-	gate := approval.New(st, tools.NewRegistry(), cfg.ApprovalTTL)
+	registry := toolRegistry(cfg.EnableDemoTools, bot)
+	gate := approval.New(st, registry, cfg.ApprovalTTL)
 	bot.SetDecider(gate)
-	opts := agentOptions(cfg)
+	opts := agentOptions(cfg, registry)
 	opts.Approvals = gate
 	opts.Cards = bot
 	opts.Notices = bot
@@ -72,13 +74,49 @@ func run() error {
 	return err
 }
 
-func agentOptions(cfg config.Config) agent.Options {
-	return agent.Options{
+// chatNotifier sends a message to a chat in one attempt. The Telegram channel implements it.
+type chatNotifier interface {
+	Notify(ctx context.Context, chatID int64, text string) error
+}
+
+// toolRegistry returns the tools the agent may call. The demo tools are registered only when
+// enabled; the registry is empty otherwise.
+func toolRegistry(enableDemo bool, notifier chatNotifier) *tools.Registry {
+	reg := tools.NewRegistry()
+	if !enableDemo {
+		return reg
+	}
+	// Registering fresh names into an empty registry cannot fail.
+	_ = reg.Register(tools.NewCurrentTimeTool())
+	_ = reg.Register(tools.NewNotifySelfTool(notifySelf(notifier)))
+	return reg
+}
+
+// notifySelf sends the text to the chat of the request that called the tool. A call without a chat
+// fails, so that nothing is sent to an unknown place.
+func notifySelf(notifier chatNotifier) tools.MessageSender {
+	return func(ctx context.Context, _ identity.UserID, text string) error {
+		chatID, ok := channel.ChatFrom(ctx)
+		if !ok {
+			return errors.New("notify_self: no chat in the request")
+		}
+		return notifier.Notify(ctx, chatID, text)
+	}
+}
+
+// agentOptions turns the configuration into agent options. The registry is offered to the model
+// only when the demo tools are enabled, so that the default configuration keeps the agent tool-free.
+func agentOptions(cfg config.Config, reg *tools.Registry) agent.Options {
+	opts := agent.Options{
 		Model:         cfg.LLMModel,
 		SystemPrompt:  systemPrompt,
 		HistoryLimit:  cfg.HistoryLimit,
 		MaxIterations: cfg.MaxLoopIterations,
 	}
+	if cfg.EnableDemoTools {
+		opts.Tools = reg
+	}
+	return opts
 }
 
 func allowedIdentities(users []config.TelegramUser) []postgres.AllowedIdentity {
