@@ -925,6 +925,77 @@ func TestToolDispatch(t *testing.T) {
 	})
 }
 
+// recordingCards records the cards it is asked to show, and fails them when err is set.
+type recordingCards struct {
+	shown []store.PendingAction
+	err   error
+}
+
+func (r *recordingCards) SendApprovalCard(ctx context.Context, action store.PendingAction) error {
+	r.shown = append(r.shown, action)
+	return r.err
+}
+
+// criticalTurns scripts one critical call to notify_self followed by a plain reply.
+func criticalTurns() *testutil.FakeModel {
+	turns := []model.CompletionResponse{
+		{ToolCalls: []model.ToolCall{{
+			ID:        "call_card",
+			Name:      "notify_self",
+			Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+		}}},
+		{Content: "Waiting."},
+	}
+	return &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		return turns[(len(req.Messages)-2)/2], nil
+	}}
+}
+
+func TestCardShownAfterProposal(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	cards := &recordingCards{}
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = cards
+	a := New(criticalTurns(), st, opts)
+
+	send(t, a, 1, "notify me")
+
+	pending := st.PendingActions(1)
+	if len(cards.shown) != 1 || len(pending) != 1 {
+		t.Fatalf("cards %d, pending %d, want one of each", len(cards.shown), len(pending))
+	}
+	if cards.shown[0].ID != pending[0].ID {
+		t.Errorf("card shows action %s, want the proposed %s", cards.shown[0].ID, pending[0].ID)
+	}
+}
+
+func TestFailedCardLeavesActionPending(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	client := criticalTurns()
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = &recordingCards{err: errors.New("telegram down")}
+	a := New(client, st, opts)
+
+	if reply := send(t, a, 1, "notify me"); reply != "Waiting." {
+		t.Errorf("reply %q, want the model's words despite the failed card", reply)
+	}
+	pending := st.PendingActions(1)
+	if len(pending) != 1 || pending[0].State != store.PendingProposed {
+		t.Fatalf("pending %+v, want one proposed action", pending)
+	}
+	if got, want := toolResult(t, client, "call_card"), "pending approval "+pending[0].ID; got != want {
+		t.Errorf("model saw %q, want %q", got, want)
+	}
+}
+
 // toolResult returns the content of the tool message that answers callID in the last request.
 func toolResult(t *testing.T, client *testutil.FakeModel, callID string) string {
 	t.Helper()

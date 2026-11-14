@@ -38,6 +38,12 @@ type Approvals interface {
 	Propose(ctx context.Context, user identity.UserID, tool tools.Tool, args json.RawMessage) (store.PendingAction, error)
 }
 
+// CardSender shows a pending action to its user. An error leaves the action pending: its card is
+// sent again later.
+type CardSender interface {
+	SendApprovalCard(ctx context.Context, action store.PendingAction) error
+}
+
 // Options configures an Agent.
 type Options struct {
 	Model         string // proxy alias
@@ -47,6 +53,8 @@ type Options struct {
 	Tools         ToolRegistry
 	// Approvals takes critical tool calls. Without it, critical calls are refused.
 	Approvals Approvals
+	// Cards shows each proposed action to its user. Without it, proposed actions have no card.
+	Cards CardSender
 }
 
 // Agent runs the conversation loop for one message at a time.
@@ -228,6 +236,7 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 				if proposeErr != nil {
 					return nil, fmt.Errorf("propose action: %w", proposeErr)
 				}
+				a.showCard(ctx, action)
 				status = store.ToolCallStatusProposed
 				content = "pending approval " + action.ID
 				resultJSON, _ = json.Marshal(content)
@@ -270,6 +279,16 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 		})
 	}
 	return messages, nil
+}
+
+// showCard sends the action's card. A failure is logged and does not fail the message.
+func (a *Agent) showCard(ctx context.Context, action store.PendingAction) {
+	if a.opts.Cards == nil {
+		return
+	}
+	if err := a.opts.Cards.SendApprovalCard(ctx, action); err != nil {
+		slog.WarnContext(ctx, "approval card not sent", "action_id", action.ID, "error", err)
+	}
 }
 
 func (a *Agent) prompt(history []store.Message) []model.Message {

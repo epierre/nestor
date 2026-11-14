@@ -50,6 +50,7 @@ func TestLoadValid(t *testing.T) {
 		LLMModel:           "strong",
 		HistoryLimit:       12,
 		MaxLoopIterations:  3,
+		ApprovalTTL:        24 * time.Hour,
 		ApprovalStaleAfter: 5 * time.Minute,
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -240,6 +241,41 @@ func TestLoadApprovalStaleAfter(t *testing.T) {
 			}
 			if cfg.ApprovalStaleAfter != tt.want {
 				t.Errorf("ApprovalStaleAfter = %v, want %v", cfg.ApprovalStaleAfter, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadApprovalTTL(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"default", "", 24 * time.Hour, false},
+		{"custom", "2h", 2 * time.Hour, false},
+		{"not a duration", "tomorrow", 0, true},
+		{"zero", "0", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			if tt.value != "" {
+				env["APPROVAL_TTL"] = tt.value
+			}
+			cfg, err := load(env)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "APPROVAL_TTL") {
+					t.Fatalf("err = %v, want one naming APPROVAL_TTL", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.ApprovalTTL != tt.want {
+				t.Errorf("ApprovalTTL = %v, want %v", cfg.ApprovalTTL, tt.want)
 			}
 		})
 	}

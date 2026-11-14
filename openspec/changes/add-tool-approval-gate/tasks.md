@@ -19,7 +19,7 @@
 
 ## 4. Telegram flow
 
-- [ ] 4.1 Approval card with inline buttons sent to the action's user only; callback queries resolved to a user ID and routed to `Decide`. Test: `telegram_test.go` "card contains preview and buttons", "card sent only to action's user", "callback reaches Decide with resolved user and action ID".
+- [x] 4.1 Approval card with inline buttons sent to the action's user only; callback queries resolved to a user ID and routed to `Decide`. Test: `telegram_test.go` "card contains preview and buttons", "card sent only to action's user", "callback reaches Decide with resolved user and action ID".
 - [ ] 4.2 Outcome and rejection messages posted to chat and appended to conversation. Test: `agent_test.go` "rejection visible to model on next turn".
 - [ ] 4.3 Edit by conversation: pending actions in context, replacement supersedes original. Test: `agent_test.go` "edit supersedes and requires new approval" (fake model scripted to propose replacement).
 - [ ] 4.4 Re-send cards for a user's still-pending actions when that user next messages after a send failure. Test: `telegram_test.go` "pending cards re-sent".

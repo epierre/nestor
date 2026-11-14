@@ -14,6 +14,7 @@ const (
 	defaultLLMModel           = "cheap"
 	defaultHistoryLimit       = 30
 	defaultMaxLoopIterations  = 8
+	defaultApprovalTTL        = 24 * time.Hour
 	defaultApprovalStaleAfter = 5 * time.Minute
 )
 
@@ -35,6 +36,8 @@ type Config struct {
 	HistoryLimit         int
 	MaxLoopIterations    int
 	EnableDemoTools      bool
+	// ApprovalTTL is how long a proposed action waits for its user's decision.
+	ApprovalTTL time.Duration
 	// ApprovalStaleAfter is how long an action may sit approved before it is failed as outcome
 	// unknown.
 	ApprovalStaleAfter time.Duration
@@ -97,6 +100,7 @@ func Load(getenv func(string) string) (Config, error) {
 		HistoryLimit:       positiveInt("HISTORY_LIMIT", defaultHistoryLimit),
 		MaxLoopIterations:  positiveInt("MAX_LOOP_ITERATIONS", defaultMaxLoopIterations),
 		EnableDemoTools:    boolean("ENABLE_DEMO_TOOLS", false),
+		ApprovalTTL:        duration("APPROVAL_TTL", defaultApprovalTTL),
 		ApprovalStaleAfter: duration("APPROVAL_STALE_AFTER", defaultApprovalStaleAfter),
 	}
 	if cfg.LLMModel == "" {
