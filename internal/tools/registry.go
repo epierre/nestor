@@ -1,11 +1,14 @@
 package tools
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/epierre/nestor/internal/model"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 var (
@@ -13,23 +16,28 @@ var (
 	ErrNotFound = errors.New("tool not found")
 	// ErrAlreadyExists is returned when registering a tool with a name that is already taken.
 	ErrAlreadyExists = errors.New("tool already registered")
+	// ErrValidation is returned when arguments fail JSON Schema validation.
+	ErrValidation = errors.New("argument validation failed")
 )
 
 // Registry is an in-memory collection of tools.
 type Registry struct {
-	mu    sync.RWMutex
-	tools map[string]Tool
-	order []string
+	mu      sync.RWMutex
+	tools   map[string]Tool
+	schemas map[string]*jsonschema.Schema
+	order   []string
 }
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		tools: make(map[string]Tool),
+		tools:   make(map[string]Tool),
+		schemas: make(map[string]*jsonschema.Schema),
 	}
 }
 
-// Register adds a tool to the registry. It returns an error if a tool with the same name exists.
+// Register adds a tool to the registry. It validates and compiles the tool's schema.
+// It returns an error if a tool with the same name exists or if the schema is invalid.
 func (r *Registry) Register(t Tool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -41,7 +49,28 @@ func (r *Registry) Register(t Tool) error {
 	if _, exists := r.tools[name]; exists {
 		return fmt.Errorf("%w: %q", ErrAlreadyExists, name)
 	}
+
+	var sch *jsonschema.Schema
+	rawSchema := t.Schema()
+	if len(bytes.TrimSpace(rawSchema)) > 0 {
+		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(rawSchema))
+		if err != nil {
+			return fmt.Errorf("invalid tool schema: %w", err)
+		}
+		c := jsonschema.NewCompiler()
+		url := fmt.Sprintf("schema://%s.json", name)
+		if err := c.AddResource(url, doc); err != nil {
+			return fmt.Errorf("add schema resource: %w", err)
+		}
+		compiled, err := c.Compile(url)
+		if err != nil {
+			return fmt.Errorf("compile tool schema: %w", err)
+		}
+		sch = compiled
+	}
+
 	r.tools[name] = t
+	r.schemas[name] = sch
 	r.order = append(r.order, name)
 	return nil
 }
@@ -74,4 +103,62 @@ func (r *Registry) Tools() []model.Tool {
 		})
 	}
 	return out
+}
+
+// Validate checks that args match the registered tool's JSON Schema.
+func (r *Registry) Validate(name string, args json.RawMessage) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	_, ok := r.tools[name]
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrNotFound, name)
+	}
+	sch := r.schemas[name]
+	if sch == nil {
+		return nil
+	}
+	if len(bytes.TrimSpace(args)) == 0 {
+		args = json.RawMessage("{}")
+	}
+	val, err := jsonschema.UnmarshalJSON(bytes.NewReader(args))
+	if err != nil {
+		return fmt.Errorf("%w: invalid JSON: %v", ErrValidation, err)
+	}
+	if err := sch.Validate(val); err != nil {
+		return fmt.Errorf("%w: %v", ErrValidation, err)
+	}
+	return nil
+}
+
+// Validate checks that args match a tool's JSON Schema.
+func Validate(t Tool, args json.RawMessage) error {
+	rawSchema := t.Schema()
+	if len(bytes.TrimSpace(rawSchema)) == 0 {
+		return nil
+	}
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(rawSchema))
+	if err != nil {
+		return fmt.Errorf("invalid tool schema: %w", err)
+	}
+	c := jsonschema.NewCompiler()
+	url := fmt.Sprintf("schema://%s.json", t.Name())
+	if err := c.AddResource(url, doc); err != nil {
+		return fmt.Errorf("add schema resource: %w", err)
+	}
+	sch, err := c.Compile(url)
+	if err != nil {
+		return fmt.Errorf("compile tool schema: %w", err)
+	}
+	if len(bytes.TrimSpace(args)) == 0 {
+		args = json.RawMessage("{}")
+	}
+	val, err := jsonschema.UnmarshalJSON(bytes.NewReader(args))
+	if err != nil {
+		return fmt.Errorf("%w: invalid JSON: %v", ErrValidation, err)
+	}
+	if err := sch.Validate(val); err != nil {
+		return fmt.Errorf("%w: %v", ErrValidation, err)
+	}
+	return nil
 }

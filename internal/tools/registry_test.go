@@ -86,4 +86,37 @@ func TestRegistry(t *testing.T) {
 			t.Errorf("expected ErrNotFound, got %v", err)
 		}
 	})
+
+	t.Run("missing required arg returns validation error", func(t *testing.T) {
+		r := tools.NewRegistry()
+		notifyTool := &dummyTool{
+			name:        "notify_self",
+			description: "send notification",
+			schema: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"text": {"type": "string"}
+				},
+				"required": ["text"]
+			}`),
+			risk: tools.RiskCritical,
+		}
+		if err := r.Register(notifyTool); err != nil {
+			t.Fatalf("Register failed: %v", err)
+		}
+
+		// Calling with valid args succeeds
+		if err := r.Validate("notify_self", json.RawMessage(`{"text": "hello"}`)); err != nil {
+			t.Errorf("expected valid args to pass, got: %v", err)
+		}
+
+		// Calling with missing required arg returns validation error
+		err := r.Validate("notify_self", json.RawMessage(`{}`))
+		if err == nil {
+			t.Fatal("expected validation error for missing required arg, got nil")
+		}
+		if !errors.Is(err, tools.ErrValidation) {
+			t.Errorf("expected ErrValidation, got: %v", err)
+		}
+	})
 }

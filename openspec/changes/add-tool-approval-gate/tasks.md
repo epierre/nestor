@@ -1,7 +1,7 @@
 ## 1. Registry
 
 - [x] 1.1 Define `Tool`, `Risk`, `Result` and an in-memory `Registry` with lookup and model-facing tool list. Test: `registry_test.go` "lists only registered tools", "unknown tool lookup fails".
-- [ ] 1.2 JSON Schema argument validation. Test: `registry_test.go` "missing required arg returns validation error".
+- [x] 1.2 JSON Schema argument validation. Test: `registry_test.go` "missing required arg returns validation error".
 - [ ] 1.3 Demo tools `current_time` (read) and `notify_self` (critical) behind `ENABLE_DEMO_TOOLS`. Test: `demo_test.go` for each tool's Execute and Preview.
 
 ## 2. Agent integration (non-critical path first)
