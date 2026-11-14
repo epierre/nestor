@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/epierre/nestor/internal/identity"
@@ -27,6 +28,9 @@ var (
 	// ErrIntegrity is returned when a pending action's arguments no longer match the hash taken
 	// at proposal. The action is marked failed and nothing runs.
 	ErrIntegrity = errors.New("pending action arguments changed after proposal")
+	// ErrOutcomeUnknown is the error of an approved action that was never recorded as executed.
+	// Such an action may or may not have run, so it is failed and never retried.
+	ErrOutcomeUnknown = errors.New("outcome unknown: may or may not have run; not retried")
 )
 
 // Decision is the user's answer to a pending action.
@@ -206,6 +210,37 @@ func (g *Gate) move(ctx context.Context, user identity.UserID, id, from string, 
 // equal to the returned ones.
 func (g *Gate) instant() time.Time {
 	return g.now().UTC().Truncate(time.Microsecond)
+}
+
+// SweepStale fails every action approved more than staleAfter before now, for all users, and
+// returns how many it failed. A failed action is never executed again.
+func SweepStale(ctx context.Context, st store.Store, now time.Time, staleAfter time.Duration) (int64, error) {
+	n, err := st.FailStaleApprovals(ctx, now.Add(-staleAfter), ErrOutcomeUnknown.Error())
+	if err != nil {
+		return 0, fmt.Errorf("sweep stale approvals: %w", err)
+	}
+	return n, nil
+}
+
+// RunSweeps runs SweepStale now and then every interval until ctx is done. A failed sweep is logged
+// and tried again at the next interval.
+func RunSweeps(ctx context.Context, st store.Store, staleAfter, every time.Duration) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		n, err := SweepStale(ctx, st, time.Now(), staleAfter)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			slog.ErrorContext(ctx, "approval sweep failed", "error", err)
+		case n > 0:
+			slog.WarnContext(ctx, "stale approvals failed as outcome unknown", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // ArgsHash returns the hex SHA-256 that binds an action to its user, tool name and exact argument

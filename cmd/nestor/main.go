@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/epierre/nestor/internal/agent"
+	"github.com/epierre/nestor/internal/approval"
 	"github.com/epierre/nestor/internal/channel/telegram"
 	"github.com/epierre/nestor/internal/config"
 	"github.com/epierre/nestor/internal/model"
@@ -48,6 +49,10 @@ func run() error {
 	if err := st.SyncAllowlist(ctx, platformTelegram, allowedIdentities(cfg.AllowedTelegramUsers)); err != nil {
 		return err
 	}
+
+	// Stale approvals are failed at startup and then every stale-after interval, so none stays
+	// approved for longer than about two intervals.
+	go approval.RunSweeps(ctx, st, cfg.ApprovalStaleAfter, cfg.ApprovalStaleAfter)
 
 	client := model.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey)
 	assistant := agent.New(client, st, agentOptions(cfg))

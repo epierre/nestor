@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -337,6 +338,19 @@ func (s *Store) UpdatePendingAction(ctx context.Context, user identity.UserID, i
 		return false, fmt.Errorf("update pending action: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// FailStaleApprovals implements store.Store. It is deliberately unscoped: see the interface.
+func (s *Store) FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions
+		SET state = 'failed', error = $2
+		WHERE state = 'approved' AND decided_at < $1`,
+		cutoff, message)
+	if err != nil {
+		return 0, fmt.Errorf("fail stale approvals: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // conversationError turns the composite foreign key's refusal into ErrConversationNotFound.

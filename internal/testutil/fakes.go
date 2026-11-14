@@ -400,3 +400,19 @@ func (s *FakeStore) actionIndex(user identity.UserID, id string) int {
 	}
 	return -1
 }
+
+// FailStaleApprovals implements store.Store.
+func (s *FakeStore) FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for i := range s.actions {
+		a := &s.actions[i]
+		if a.State == store.PendingApproved && a.DecidedAt != nil && a.DecidedAt.Before(cutoff) {
+			a.State = store.PendingFailed
+			a.Error = message
+			n++
+		}
+	}
+	return n, nil
+}

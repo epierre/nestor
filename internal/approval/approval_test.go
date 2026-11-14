@@ -273,3 +273,65 @@ func TestRejectNeverExecutes(t *testing.T) {
 		t.Errorf("approve after reject: err = %v, want ErrNoPendingAction", err)
 	}
 }
+
+// approveButStall records an approval without running it, as a crash after the claim would leave it.
+func (h *harness) approveButStall(t *testing.T, user identity.UserID, id string) {
+	t.Helper()
+	claimed := h.gate.instant()
+	ok, err := h.st.UpdatePendingAction(identity.WithUser(context.Background(), user), user, id,
+		store.PendingProposed, store.PendingUpdate{State: store.PendingApproved, DecidedAt: &claimed})
+	if err != nil || !ok {
+		t.Fatalf("stall approval: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestStaleApprovedFailedAsUnknown(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+	h.approveButStall(t, testUser, action.ID)
+
+	n, err := SweepStale(context.Background(), h.st, h.now.Add(10*time.Minute), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("swept %d actions, want 1", n)
+	}
+	stored := h.stored(t, testUser, action.ID)
+	if stored.State != store.PendingFailed || stored.Error != ErrOutcomeUnknown.Error() {
+		t.Errorf("state %q error %q, want failed with the outcome-unknown error", stored.State, stored.Error)
+	}
+}
+
+func TestFreshApprovedLeftAlone(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+	h.approveButStall(t, testUser, action.ID)
+
+	n, err := SweepStale(context.Background(), h.st, h.now.Add(time.Minute), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("swept %d actions, want 0", n)
+	}
+	if state := h.stored(t, testUser, action.ID).State; state != store.PendingApproved {
+		t.Errorf("state %q, want approved", state)
+	}
+}
+
+func TestStaleApprovedNeverReExecuted(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+	h.approveButStall(t, testUser, action.ID)
+	if _, err := SweepStale(context.Background(), h.st, h.now.Add(10*time.Minute), 5*time.Minute); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+
+	if _, err := h.decide(testUser, action.ID, Approve); !errors.Is(err, ErrNoPendingAction) {
+		t.Errorf("approve after sweep: err = %v, want ErrNoPendingAction", err)
+	}
+	if h.sends != 0 {
+		t.Errorf("tool ran %d times, want 0", h.sends)
+	}
+}

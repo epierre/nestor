@@ -141,3 +141,56 @@ func TestUpdatePendingActionOnlyFromExpectedState(t *testing.T) {
 		t.Errorf("state %q decided_at %v, want rejected at %v", got.State, got.DecidedAt, decided)
 	}
 }
+
+func TestFailStaleApprovalsTouchesOnlyStaleApproved(t *testing.T) {
+	st, pool, a, b, ctxA, ctxB := twoScoped(t)
+	tool := tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil })
+	gate := approval.New(st, tools.NewRegistry(), time.Hour)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	old := now.Add(-time.Hour)
+
+	// Each user gets one stale approval, one fresh approval, and one still proposed.
+	propose := func(ctx context.Context, user identity.UserID) store.PendingAction {
+		action, err := gate.Propose(ctx, user, tool, json.RawMessage(`{"text": "hi"}`))
+		if err != nil {
+			t.Fatalf("Propose: %v", err)
+		}
+		return action
+	}
+	approve := func(ctx context.Context, user identity.UserID, id string, at time.Time) {
+		ok, err := st.UpdatePendingAction(ctx, user, id, store.PendingProposed,
+			store.PendingUpdate{State: store.PendingApproved, DecidedAt: &at})
+		if err != nil || !ok {
+			t.Fatalf("approve %s: ok=%v err=%v", id, ok, err)
+		}
+	}
+	staleA, freshA, proposedA := propose(ctxA, a), propose(ctxA, a), propose(ctxA, a)
+	staleB := propose(ctxB, b)
+	approve(ctxA, a, staleA.ID, old)
+	approve(ctxA, a, freshA.ID, now)
+	approve(ctxB, b, staleB.ID, old)
+
+	n, err := approval.SweepStale(context.Background(), st, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("swept %d actions, want 2 (one per user)", n)
+	}
+
+	want := map[string]string{
+		staleA.ID:    store.PendingFailed,
+		freshA.ID:    store.PendingApproved,
+		proposedA.ID: store.PendingProposed,
+		staleB.ID:    store.PendingFailed,
+	}
+	for id, state := range want {
+		var got string
+		if err := pool.QueryRow(context.Background(), `SELECT state FROM pending_actions WHERE id = $1`, id).Scan(&got); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if got != state {
+			t.Errorf("action %s state %q, want %q", id, got, state)
+		}
+	}
+}

@@ -150,6 +150,10 @@ type Store interface {
 	// UpdatePendingAction applies update only while the user's action is in state from. It
 	// reports false when it is in another state, which is how a repeated decision loses the race.
 	UpdatePendingAction(ctx context.Context, user identity.UserID, id, from string, update PendingUpdate) (bool, error)
+	// FailStaleApprovals marks every action approved before cutoff as failed with message, for
+	// all users, and returns how many it changed. It is the one method without a user ID: it reads
+	// no user data and changes only approved rows past cutoff.
+	FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error)
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's
