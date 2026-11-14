@@ -99,4 +99,4 @@ Action IDs are random (UUIDv7 or similar), not sequential integers, so they cann
 
 ## Configuration
 
-`APPROVAL_TTL` (default 24h), `ENABLE_DEMO_TOOLS` (default false).
+`APPROVAL_TTL` (default 24h), `APPROVAL_STALE_AFTER` (default 5m: how long an action may sit in `approved` before the sweep marks it failed as outcome unknown), `ENABLE_DEMO_TOOLS` (default false).
