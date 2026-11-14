@@ -88,6 +88,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 		}
 		return noticeNewConversation, nil
 	}
+	a.resendCards(ctx, user)
 	conversation, err := a.store.ActiveConversation(ctx, user)
 	if err != nil {
 		return "", fmt.Errorf("load conversation: %w", err)
@@ -236,7 +237,7 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 				if proposeErr != nil {
 					return nil, fmt.Errorf("propose action: %w", proposeErr)
 				}
-				a.showCard(ctx, action)
+				a.showCard(ctx, user, action)
 				status = store.ToolCallStatusProposed
 				content = "pending approval " + action.ID
 				resultJSON, _ = json.Marshal(content)
@@ -281,13 +282,33 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 	return messages, nil
 }
 
-// showCard sends the action's card. A failure is logged and does not fail the message.
-func (a *Agent) showCard(ctx context.Context, action store.PendingAction) {
+// showCard sends the action's card and records the delivery. A failure is logged and does not
+// fail the message: the card is sent again on the user's next message.
+func (a *Agent) showCard(ctx context.Context, user identity.UserID, action store.PendingAction) {
 	if a.opts.Cards == nil {
 		return
 	}
 	if err := a.opts.Cards.SendApprovalCard(ctx, action); err != nil {
 		slog.WarnContext(ctx, "approval card not sent", "action_id", action.ID, "error", err)
+		return
+	}
+	if err := a.store.MarkCardSent(ctx, user, action.ID, time.Now()); err != nil {
+		slog.WarnContext(ctx, "approval card delivery not recorded", "action_id", action.ID, "error", err)
+	}
+}
+
+// resendCards shows again the cards of the user's pending actions that were never delivered.
+func (a *Agent) resendCards(ctx context.Context, user identity.UserID) {
+	if a.opts.Cards == nil {
+		return
+	}
+	unsent, err := a.store.UnsentCards(ctx, user, time.Now())
+	if err != nil {
+		slog.WarnContext(ctx, "unsent approval cards not listed", "error", err)
+		return
+	}
+	for _, action := range unsent {
+		a.showCard(ctx, user, action)
 	}
 }
 

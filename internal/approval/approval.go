@@ -102,6 +102,11 @@ func (g *Gate) Propose(ctx context.Context, user identity.UserID, tool tools.Too
 	if err := g.store.ProposeAction(ctx, user, action); err != nil {
 		return store.PendingAction{}, fmt.Errorf("store pending action: %w", err)
 	}
+	// One pending action per tool: the new one replaces the earlier ones, which can no longer be
+	// approved. If this fails, both stay approvable, and each still needs its own approval.
+	if _, err := g.store.SupersedePending(ctx, user, tool.Name(), id); err != nil {
+		slog.ErrorContext(ctx, "earlier pending actions not superseded", "action_id", id, "error", err)
+	}
 	action.UserID = user
 	return action, nil
 }

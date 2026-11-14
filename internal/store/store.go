@@ -92,12 +92,13 @@ type ToolCall struct {
 // Values of PendingAction.State. Only the proposed state is written so far; the others are
 // listed so the stored states match the design.
 const (
-	PendingProposed = "proposed"
-	PendingApproved = "approved"
-	PendingRejected = "rejected"
-	PendingExecuted = "executed"
-	PendingFailed   = "failed"
-	PendingExpired  = "expired"
+	PendingProposed   = "proposed"
+	PendingApproved   = "approved"
+	PendingRejected   = "rejected"
+	PendingExecuted   = "executed"
+	PendingFailed     = "failed"
+	PendingExpired    = "expired"
+	PendingSuperseded = "superseded"
 )
 
 // ErrActionNotFound is returned when a pending action does not exist or belongs to another user.
@@ -107,19 +108,21 @@ var ErrActionNotFound = errors.New("pending action not found")
 // PendingAction is a critical tool call waiting for its user's approval. ArgsJSON is the exact
 // text that ArgsHash covers.
 type PendingAction struct {
-	ID         string
-	UserID     identity.UserID
-	ToolName   string
-	ArgsJSON   json.RawMessage
-	ArgsHash   string
-	Preview    string
-	State      string
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-	DecidedAt  *time.Time // nil until the user or the clock decides
-	ExecutedAt *time.Time // nil until the tool has run, or failed to
-	ResultJSON json.RawMessage
-	Error      string
+	ID           string
+	UserID       identity.UserID
+	ToolName     string
+	ArgsJSON     json.RawMessage
+	ArgsHash     string
+	Preview      string
+	State        string
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
+	DecidedAt    *time.Time // nil until the user or the clock decides
+	ExecutedAt   *time.Time // nil until the tool has run, or failed to
+	ResultJSON   json.RawMessage
+	Error        string
+	SupersededBy string     // set when a replacement for this action was proposed
+	CardSentAt   *time.Time // nil until its approval card was delivered
 }
 
 // PendingUpdate sets the fields that a decision changes. A nil time leaves the stored one alone.
@@ -154,6 +157,13 @@ type Store interface {
 	// all users, and returns how many it changed. It is the one method without a user ID: it reads
 	// no user data and changes only approved rows past cutoff.
 	FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error)
+	// SupersedePending marks the user's other proposed actions for tool as superseded by keepID,
+	// and returns how many it changed.
+	SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error)
+	// MarkCardSent records that the action's card was delivered.
+	MarkCardSent(ctx context.Context, user identity.UserID, id string, at time.Time) error
+	// UnsentCards returns the user's proposed, unexpired actions whose cards were not delivered.
+	UnsentCards(ctx context.Context, user identity.UserID, now time.Time) ([]PendingAction, error)
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's

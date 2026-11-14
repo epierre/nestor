@@ -402,3 +402,71 @@ func TestOutcomeRecordedInConversation(t *testing.T) {
 		})
 	}
 }
+
+func TestNewProposalSupersedesEarlierOfSameTool(t *testing.T) {
+	h := newHarness(t)
+	first := h.propose(t, testUser)
+	second := h.propose(t, testUser)
+
+	if state := h.stored(t, testUser, first.ID).State; state != store.PendingSuperseded {
+		t.Errorf("earlier action state %q, want superseded", state)
+	}
+	if got := h.stored(t, testUser, first.ID).SupersededBy; got != second.ID {
+		t.Errorf("superseded_by %q, want %s", got, second.ID)
+	}
+	if state := h.stored(t, testUser, second.ID).State; state != store.PendingProposed {
+		t.Errorf("replacement state %q, want proposed", state)
+	}
+
+	if _, err := h.decide(testUser, first.ID, Approve); !errors.Is(err, ErrNoPendingAction) {
+		t.Errorf("approving superseded action: err = %v, want ErrNoPendingAction", err)
+	}
+	if h.sends != 0 {
+		t.Errorf("tool ran %d times, want 0 (replacement needs its own approval)", h.sends)
+	}
+}
+
+func TestSupersedeLeavesOtherUsersActionsAlone(t *testing.T) {
+	h := newHarness(t)
+	theirs := h.propose(t, other)
+	h.propose(t, testUser)
+
+	if state := h.stored(t, other, theirs.ID).State; state != store.PendingProposed {
+		t.Errorf("other user's action state %q, want proposed", state)
+	}
+}
+
+func TestUnsentCardsAreRetriedUntilMarked(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+	ctx := identity.WithUser(context.Background(), testUser)
+
+	unsent, err := h.st.UnsentCards(ctx, testUser, h.now)
+	if err != nil {
+		t.Fatalf("UnsentCards: %v", err)
+	}
+	if len(unsent) != 1 || unsent[0].ID != action.ID {
+		t.Fatalf("unsent %+v, want the new action", unsent)
+	}
+	if err := h.st.MarkCardSent(ctx, testUser, action.ID, h.now); err != nil {
+		t.Fatalf("MarkCardSent: %v", err)
+	}
+	unsent, _ = h.st.UnsentCards(ctx, testUser, h.now)
+	if len(unsent) != 0 {
+		t.Errorf("unsent after marking %+v, want none", unsent)
+	}
+}
+
+func TestExpiredActionsGetNoCardRetry(t *testing.T) {
+	h := newHarness(t)
+	h.propose(t, testUser)
+	ctx := identity.WithUser(context.Background(), testUser)
+
+	unsent, err := h.st.UnsentCards(ctx, testUser, h.now.Add(testTTL+time.Second))
+	if err != nil {
+		t.Fatalf("UnsentCards: %v", err)
+	}
+	if len(unsent) != 0 {
+		t.Errorf("unsent %+v, want none after expiry", unsent)
+	}
+}

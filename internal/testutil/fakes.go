@@ -391,6 +391,56 @@ func (s *FakeStore) TamperPendingAction(id string, args json.RawMessage) {
 	}
 }
 
+// SupersedePending implements store.Store.
+func (s *FakeStore) SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for i := range s.actions {
+		a := &s.actions[i]
+		if a.UserID == user && a.ToolName == tool && a.State == store.PendingProposed && a.ID != keepID {
+			a.State = store.PendingSuperseded
+			a.SupersededBy = keepID
+			n++
+		}
+	}
+	return n, nil
+}
+
+// MarkCardSent implements store.Store.
+func (s *FakeStore) MarkCardSent(ctx context.Context, user identity.UserID, id string, at time.Time) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.actionIndex(user, id)
+	if i < 0 {
+		return store.ErrActionNotFound
+	}
+	s.actions[i].CardSentAt = &at
+	return nil
+}
+
+// UnsentCards implements store.Store.
+func (s *FakeStore) UnsentCards(ctx context.Context, user identity.UserID, now time.Time) ([]store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []store.PendingAction
+	for _, a := range s.actions {
+		if a.UserID == user && a.State == store.PendingProposed && a.CardSentAt == nil && a.ExpiresAt.After(now) {
+			found = append(found, a)
+		}
+	}
+	return found, nil
+}
+
 // actionIndex returns the position of user's action id, or -1. The caller holds s.mu.
 func (s *FakeStore) actionIndex(user identity.UserID, id string) int {
 	for i, a := range s.actions {

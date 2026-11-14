@@ -925,15 +925,21 @@ func TestToolDispatch(t *testing.T) {
 	})
 }
 
-// recordingCards records the cards it is asked to show, and fails them when err is set.
+// recordingCards records the cards it is asked to show. Its first failures calls fail, and err is
+// the error they return.
 type recordingCards struct {
-	shown []store.PendingAction
-	err   error
+	shown    []store.PendingAction
+	failures int
+	err      error
 }
 
 func (r *recordingCards) SendApprovalCard(ctx context.Context, action store.PendingAction) error {
 	r.shown = append(r.shown, action)
-	return r.err
+	if r.failures > 0 {
+		r.failures--
+		return r.err
+	}
+	return nil
 }
 
 // criticalTurns scripts one critical call to notify_self followed by a plain reply.
@@ -1024,7 +1030,7 @@ func TestFailedCardLeavesActionPending(t *testing.T) {
 	opts := testOptions()
 	opts.Tools = reg
 	opts.Approvals = approval.New(st, reg, time.Hour)
-	opts.Cards = &recordingCards{err: errors.New("telegram down")}
+	opts.Cards = &recordingCards{failures: 1, err: errors.New("telegram down")}
 	a := New(client, st, opts)
 
 	if reply := send(t, a, 1, "notify me"); reply != "Waiting." {
@@ -1146,5 +1152,97 @@ func TestStructuralCriticalToolExecution(t *testing.T) {
 		if !strings.HasPrefix(site, "internal/agent/agent.go:") {
 			t.Errorf("forbidden Execute call site outside internal/approval: %s", site)
 		}
+	}
+}
+
+func TestEditSupersedesAndRequiresNewApproval(t *testing.T) {
+	reg := tools.NewRegistry()
+	sends := 0
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { sends++; return nil }))
+	st := testutil.NewFakeStore()
+	cards := &recordingCards{}
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = cards
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		last := req.Messages[len(req.Messages)-1]
+		call := func(text string) model.CompletionResponse {
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{{
+				ID: "call_" + text, Name: "notify_self", Arguments: json.RawMessage(`{"text": "` + text + `"}`),
+			}}}
+		}
+		switch {
+		case last.Role == model.RoleUser && last.Content == "notify me":
+			return call("Dentist at 3pm"), nil
+		case last.Role == model.RoleUser && last.Content == "make it 4pm":
+			// The first proposal is still in history, so the model can refer to it.
+			return call("Dentist at 4pm"), nil
+		}
+		return model.CompletionResponse{Content: "Updated, please approve."}, nil
+	}}
+	a := New(client, st, opts)
+
+	send(t, a, 1, "notify me")
+	send(t, a, 1, "make it 4pm")
+
+	pending := st.PendingActions(1)
+	if len(pending) != 2 {
+		t.Fatalf("got %d actions, want the original and its replacement", len(pending))
+	}
+	original, replacement := pending[0], pending[1]
+	if original.State != store.PendingSuperseded || original.SupersededBy != replacement.ID {
+		t.Errorf("original state %q superseded_by %q, want superseded by %s", original.State, original.SupersededBy, replacement.ID)
+	}
+	if replacement.State != store.PendingProposed || replacement.Preview != "Notify yourself: Dentist at 4pm" {
+		t.Errorf("replacement %+v, want a proposed 4pm action", replacement)
+	}
+	if sends != 0 {
+		t.Errorf("tool ran %d times, want 0", sends)
+	}
+	if len(cards.shown) != 2 || cards.shown[1].ID != replacement.ID {
+		t.Errorf("cards shown %+v, want a card for the replacement", cards.shown)
+	}
+}
+
+func TestPendingCardsResentOnNextMessage(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	cards := &recordingCards{failures: 1, err: errors.New("telegram down")}
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = cards
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		last := req.Messages[len(req.Messages)-1]
+		switch {
+		case last.Role == model.RoleUser && last.Content == "notify me":
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{{
+				ID: "call_resend", Name: "notify_self", Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+			}}}, nil
+		case last.Role == model.RoleUser:
+			return model.CompletionResponse{Content: "ok"}, nil
+		}
+		return model.CompletionResponse{Content: "Waiting."}, nil
+	}}
+	a := New(client, st, opts)
+
+	send(t, a, 1, "notify me")
+	if pending := st.PendingActions(1); len(pending) != 1 || pending[0].CardSentAt != nil {
+		t.Fatalf("after failed send: %+v, want one action with no card sent", pending)
+	}
+
+	send(t, a, 1, "hello")
+	if len(cards.shown) != 2 || cards.shown[1].ID != cards.shown[0].ID {
+		t.Fatalf("cards shown %+v, want the same action shown again on the next message", cards.shown)
+	}
+
+	send(t, a, 1, "hello again")
+	if len(cards.shown) != 2 {
+		t.Errorf("card re-sent after delivery: %d shown, want 2", len(cards.shown))
+	}
+	if pending := st.PendingActions(1); pending[0].CardSentAt == nil {
+		t.Error("card delivered but not marked as sent")
 	}
 }

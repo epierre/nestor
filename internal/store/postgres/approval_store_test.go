@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -144,16 +145,26 @@ func TestUpdatePendingActionOnlyFromExpectedState(t *testing.T) {
 
 func TestFailStaleApprovalsTouchesOnlyStaleApproved(t *testing.T) {
 	st, pool, a, b, ctxA, ctxB := twoScoped(t)
-	tool := tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil })
-	gate := approval.New(st, tools.NewRegistry(), time.Hour)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	old := now.Add(-time.Hour)
 
-	// Each user gets one stale approval, one fresh approval, and one still proposed.
+	// Rows go in directly, each with its own tool, so that one pending action per tool does not
+	// supersede the others.
+	made := 0
 	propose := func(ctx context.Context, user identity.UserID) store.PendingAction {
-		action, err := gate.Propose(ctx, user, tool, json.RawMessage(`{"text": "hi"}`))
-		if err != nil {
-			t.Fatalf("Propose: %v", err)
+		made++
+		action := store.PendingAction{
+			ID:        fmt.Sprintf("sweep-%d", made),
+			ToolName:  fmt.Sprintf("tool_%d", made),
+			ArgsJSON:  json.RawMessage(`{"text": "hi"}`),
+			ArgsHash:  "unused",
+			Preview:   "hi",
+			State:     store.PendingProposed,
+			CreatedAt: now,
+			ExpiresAt: now.Add(time.Hour),
+		}
+		if err := st.ProposeAction(ctx, user, action); err != nil {
+			t.Fatalf("ProposeAction: %v", err)
 		}
 		return action
 	}
@@ -192,5 +203,47 @@ func TestFailStaleApprovalsTouchesOnlyStaleApproved(t *testing.T) {
 		if got != state {
 			t.Errorf("action %s state %q, want %q", id, got, state)
 		}
+	}
+}
+
+func TestSupersedeAndCardRetryAreScopedToUser(t *testing.T) {
+	st, _, a, b, ctxA, ctxB := twoScoped(t)
+	tool := tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil })
+	gate := approval.New(st, tools.NewRegistry(), time.Hour)
+	args := json.RawMessage(`{"text": "hi"}`)
+
+	theirs, err := gate.Propose(ctxB, b, tool, args)
+	if err != nil {
+		t.Fatalf("Propose for B: %v", err)
+	}
+	first, err := gate.Propose(ctxA, a, tool, args)
+	if err != nil {
+		t.Fatalf("Propose for A: %v", err)
+	}
+	second, err := gate.Propose(ctxA, a, tool, args)
+	if err != nil {
+		t.Fatalf("second Propose for A: %v", err)
+	}
+
+	got, err := st.GetPendingAction(ctxA, a, first.ID)
+	if err != nil {
+		t.Fatalf("GetPendingAction: %v", err)
+	}
+	if got.State != store.PendingSuperseded || got.SupersededBy != second.ID {
+		t.Errorf("A's first action state %q superseded_by %q, want superseded by %s", got.State, got.SupersededBy, second.ID)
+	}
+	if got, _ := st.GetPendingAction(ctxB, b, theirs.ID); got.State != store.PendingProposed {
+		t.Errorf("B's action state %q, want proposed", got.State)
+	}
+
+	unsent, err := st.UnsentCards(ctxA, a, time.Now())
+	if err != nil {
+		t.Fatalf("UnsentCards: %v", err)
+	}
+	if len(unsent) != 1 || unsent[0].ID != second.ID {
+		t.Errorf("A's unsent cards %+v, want only the replacement", unsent)
+	}
+	if err := st.MarkCardSent(ctxB, b, second.ID, time.Now()); !errors.Is(err, store.ErrActionNotFound) {
+		t.Errorf("marking A's card as B: err = %v, want ErrActionNotFound", err)
 	}
 }

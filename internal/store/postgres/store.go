@@ -288,35 +288,111 @@ func (s *Store) ProposeAction(ctx context.Context, user identity.UserID, action 
 	return nil
 }
 
+// pendingColumns lists the columns that scanPending reads, in its order.
+const pendingColumns = `id, user_id, tool_name, args_json::text, args_hash, preview, state, created_at,
+	expires_at, decided_at, executed_at, result_json::text, error, superseded_by, card_sent_at`
+
+// scanPending reads one row of pendingColumns.
+func scanPending(row pgx.Row) (store.PendingAction, error) {
+	var (
+		action     store.PendingAction
+		argsJSON   string
+		resultJSON *string
+		supersede  *string
+	)
+	err := row.Scan(&action.ID, &action.UserID, &action.ToolName, &argsJSON, &action.ArgsHash,
+		&action.Preview, &action.State, &action.CreatedAt, &action.ExpiresAt, &action.DecidedAt,
+		&action.ExecutedAt, &resultJSON, &action.Error, &supersede, &action.CardSentAt)
+	if err != nil {
+		return store.PendingAction{}, err
+	}
+	action.ArgsJSON = json.RawMessage(argsJSON)
+	if resultJSON != nil {
+		action.ResultJSON = json.RawMessage(*resultJSON)
+	}
+	if supersede != nil {
+		action.SupersededBy = *supersede
+	}
+	return action, nil
+}
+
 // GetPendingAction implements store.Store.
 func (s *Store) GetPendingAction(ctx context.Context, user identity.UserID, id string) (store.PendingAction, error) {
 	if err := store.RequireUser(ctx, user); err != nil {
 		return store.PendingAction{}, err
 	}
-	var (
-		action     store.PendingAction
-		argsJSON   string
-		resultJSON *string
-	)
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, user_id, tool_name, args_json::text, args_hash, preview, state, created_at,
-			expires_at, decided_at, executed_at, result_json::text, error
+	action, err := scanPending(s.pool.QueryRow(ctx, `
+		SELECT `+pendingColumns+`
 		FROM pending_actions
-		WHERE id = $1 AND user_id = $2`,
-		id, user).Scan(&action.ID, &action.UserID, &action.ToolName, &argsJSON, &action.ArgsHash,
-		&action.Preview, &action.State, &action.CreatedAt, &action.ExpiresAt, &action.DecidedAt,
-		&action.ExecutedAt, &resultJSON, &action.Error)
+		WHERE id = $1 AND user_id = $2`, id, user))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.PendingAction{}, store.ErrActionNotFound
 	}
 	if err != nil {
 		return store.PendingAction{}, fmt.Errorf("get pending action: %w", err)
 	}
-	action.ArgsJSON = json.RawMessage(argsJSON)
-	if resultJSON != nil {
-		action.ResultJSON = json.RawMessage(*resultJSON)
-	}
 	return action, nil
+}
+
+// SupersedePending implements store.Store.
+func (s *Store) SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return 0, err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions
+		SET state = 'superseded', superseded_by = $3
+		WHERE user_id = $1 AND tool_name = $2 AND state = 'proposed' AND id <> $3`,
+		user, tool, keepID)
+	if err != nil {
+		return 0, fmt.Errorf("supersede pending actions: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// MarkCardSent implements store.Store.
+func (s *Store) MarkCardSent(ctx context.Context, user identity.UserID, id string, at time.Time) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions SET card_sent_at = $3
+		WHERE id = $1 AND user_id = $2`, id, user, at)
+	if err != nil {
+		return fmt.Errorf("mark card sent: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return store.ErrActionNotFound
+	}
+	return nil
+}
+
+// UnsentCards implements store.Store.
+func (s *Store) UnsentCards(ctx context.Context, user identity.UserID, now time.Time) ([]store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+pendingColumns+`
+		FROM pending_actions
+		WHERE user_id = $1 AND state = 'proposed' AND card_sent_at IS NULL AND expires_at > $2
+		ORDER BY created_at`, user, now)
+	if err != nil {
+		return nil, fmt.Errorf("list unsent cards: %w", err)
+	}
+	defer rows.Close()
+	var found []store.PendingAction
+	for rows.Next() {
+		action, err := scanPending(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan unsent card: %w", err)
+		}
+		found = append(found, action)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list unsent cards: %w", err)
+	}
+	return found, nil
 }
 
 // UpdatePendingAction implements store.Store. The state check and the change are one statement,

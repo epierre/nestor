@@ -66,6 +66,12 @@ user replies in the chat instead of tapping, the agent receives the reply with t
 action in context, may propose a replacement, and the old action becomes `superseded`. The new
 action gets a new card and needs its own approval.
 
+Implementation rule: a new proposal supersedes every other proposed action of the same tool for
+the same user, so there is at most one live action per tool. The model refers to the earlier
+action through its own tool call and the `pending approval <id>` result already in history;
+no preview or argument text is added to system messages. A superseded card still has buttons,
+and pressing them answers "no longer pending".
+
 ## Untrusted content handling
 
 Tool results are appended as `tool` role messages wrapped in a marker stating they are data.
@@ -78,7 +84,7 @@ response leaks nothing about other users' actions.
 ## Data model
 
 - `tool_calls(id, user_id, conversation_id, model_call_id, tool_name, args_json, risk, status, result_json, error, started_at, latency_ms)`
-- `pending_actions(id, user_id, tool_call_id, tool_name, args_json, args_hash, preview, state, created_at, expires_at, decided_at, executed_at, result_json, error, superseded_by)`
+- `pending_actions(id, user_id, tool_call_id, tool_name, args_json, args_hash, preview, state, created_at, expires_at, decided_at, executed_at, result_json, error, superseded_by, card_sent_at)`
 
 Action IDs are random (UUIDv7 or similar), not sequential integers, so they cannot be guessed.
 `args_hash` covers user ID, tool name and arguments together.
@@ -94,8 +100,9 @@ Action IDs are random (UUIDv7 or similar), not sequential integers, so they cann
 - Process restarts with actions `proposed`: they stay valid until expiry; buttons keep working.
 - Callback for an unknown, already-decided or someone else's action: the tapper receives
   "This action is no longer pending."
-- Telegram down when the card should be sent: the action is stored; the card is re-sent when
-  that user next messages, listing all of their still-pending actions.
+- Telegram down when the card should be sent: the action is stored and `card_sent_at` stays
+  empty; when that user next messages, every proposed, unexpired action without a delivered card
+  is shown again, and each delivered card is marked.
 
 ## Configuration
 
