@@ -51,6 +51,9 @@ type Agent struct {
 
 // New returns an Agent using client and st.
 func New(client model.ModelClient, st store.Store, opts Options) *Agent {
+	if reg, ok := opts.Tools.(*tools.Registry); ok {
+		opts.Tools = reg.AgentView()
+	}
 	return &Agent{client: client, store: st, opts: opts}
 }
 

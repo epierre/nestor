@@ -8,7 +8,7 @@
 
 - [x] 2.1 Agent loop dispatches tool calls through the registry and appends results as marked tool messages. Test: `agent_test.go` "read tool executes and result returned", "unknown tool yields error result".
 - [x] 2.2 Migration for `tool_calls` with user_id; record every call; tools execute with the user ID in context. Test: integration `store_test.go` "tool call recorded with user", `agent_test.go` "tool receives requesting user in context", "user_id argument rejected by schema".
-- [ ] 2.3 Agent holds a registry view that refuses to execute critical tools. Test: `agent_test.go` "critical tool never executed by agent", plus a structural test asserting `Execute` on critical tools is only called from `internal/approval`.
+- [x] 2.3 Agent holds a registry view that refuses to execute critical tools. Test: `agent_test.go` "critical tool never executed by agent", plus a structural test asserting `Execute` on critical tools is only called from `internal/approval`.
 
 ## 3. Pending actions
 

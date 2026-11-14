@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,8 @@ var (
 	ErrAlreadyExists = errors.New("tool already registered")
 	// ErrValidation is returned when arguments fail JSON Schema validation.
 	ErrValidation = errors.New("argument validation failed")
+	// ErrCriticalRefusal is returned when attempting to execute a critical tool through an AgentView.
+	ErrCriticalRefusal = errors.New("execution of critical tools is forbidden without approval")
 )
 
 // Registry is an in-memory collection of tools.
@@ -161,4 +164,41 @@ func Validate(t Tool, args json.RawMessage) error {
 		return fmt.Errorf("%w: %v", ErrValidation, err)
 	}
 	return nil
+}
+
+// AgentView wraps a Registry to enforce that critical tools cannot be executed by the agent.
+type AgentView struct {
+	reg *Registry
+}
+
+// AgentView returns a view of the registry that refuses direct execution of critical tools.
+func (r *Registry) AgentView() *AgentView {
+	return &AgentView{reg: r}
+}
+
+func (v *AgentView) Tools() []model.Tool {
+	return v.reg.Tools()
+}
+
+func (v *AgentView) Lookup(name string) (Tool, error) {
+	t, err := v.reg.Lookup(name)
+	if err != nil {
+		return nil, err
+	}
+	if t.Risk() == RiskCritical {
+		return &refusingTool{Tool: t}, nil
+	}
+	return t, nil
+}
+
+func (v *AgentView) Validate(name string, args json.RawMessage) error {
+	return v.reg.Validate(name, args)
+}
+
+type refusingTool struct {
+	Tool
+}
+
+func (r *refusingTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {
+	return Result{}, ErrCriticalRefusal
 }

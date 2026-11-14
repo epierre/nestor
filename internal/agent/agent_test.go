@@ -5,9 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -776,6 +782,55 @@ func TestToolDispatch(t *testing.T) {
 			t.Errorf("expected 0 calls for user 999, got %d", len(calls999))
 		}
 	})
+
+	t.Run("critical tool never executed by agent", func(t *testing.T) {
+		var executed bool
+		sender := func(ctx context.Context, uid identity.UserID, text string) error {
+			executed = true
+			return nil
+		}
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewNotifySelfTool(sender))
+
+		call := model.ToolCall{
+			ID:        "call_crit",
+			Name:      "notify_self",
+			Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+		}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Waiting."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		opts := testOptions()
+		opts.Tools = reg
+		st := testutil.NewFakeStore()
+		a := New(client, st, opts)
+
+		reply := send(t, a, 1, "notify me")
+		if reply != "Waiting." {
+			t.Errorf("got reply %q, want 'Waiting.'", reply)
+		}
+
+		// Tool was never executed
+		if executed {
+			t.Error("critical tool must never be executed by agent")
+		}
+
+		// Tool obtained from agent's registry view refuses direct execution
+		tool, err := a.opts.Tools.Lookup("notify_self")
+		if err != nil {
+			t.Fatalf("Lookup notify_self: %v", err)
+		}
+		_, execErr := tool.Execute(identity.WithUser(context.Background(), 1), json.RawMessage(`{"text": "Dentist at 3pm"}`))
+		if !errors.Is(execErr, tools.ErrCriticalRefusal) {
+			t.Errorf("expected ErrCriticalRefusal from agent view, got: %v", execErr)
+		}
+	})
 }
 
 type testUserTool struct {
@@ -792,4 +847,67 @@ func (t *testUserTool) Execute(ctx context.Context, args json.RawMessage) (tools
 		t.onExec(ctx)
 	}
 	return tools.Result{Content: "ok"}, nil
+}
+
+func TestStructuralCriticalToolExecution(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find repo root")
+		}
+		dir = parent
+	}
+
+	fset := token.NewFileSet()
+	var callSites []string
+
+	err = filepath.Walk(filepath.Join(dir, "internal"), func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, path)
+		if strings.HasPrefix(rel, "internal/approval") || strings.HasPrefix(rel, "internal/tools") || strings.HasPrefix(rel, "internal/testutil") {
+			return nil
+		}
+
+		node, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+
+		ast.Inspect(node, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Execute" {
+				return true
+			}
+			pos := fset.Position(call.Pos())
+			callSites = append(callSites, rel+":"+strconv.Itoa(pos.Line))
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ast walk: %v", err)
+	}
+
+	// Verify that the only call site outside approval is in agent.go
+	for _, site := range callSites {
+		if !strings.HasPrefix(site, "internal/agent/agent.go:") {
+			t.Errorf("forbidden Execute call site outside internal/approval: %s", site)
+		}
+	}
 }
