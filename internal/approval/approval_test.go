@@ -470,3 +470,38 @@ func TestExpiredActionsGetNoCardRetry(t *testing.T) {
 		t.Errorf("unsent %+v, want none after expiry", unsent)
 	}
 }
+
+func TestApproveAfterRestartExecutesOnce(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+
+	// A restart is a new Gate over the same store, as in the agent tests.
+	restarted := New(h.st, h.gate.tools, testTTL)
+	restarted.now = h.gate.now
+	got, err := restarted.Decide(identity.WithUser(context.Background(), testUser), testUser, action.ID, Approve)
+	if err != nil {
+		t.Fatalf("Decide after restart: %v", err)
+	}
+	if got.State != store.PendingExecuted || h.sends != 1 {
+		t.Errorf("state %q, tool ran %d times; want executed once", got.State, h.sends)
+	}
+}
+
+func TestExecutedActionKeepsItsAuditTrail(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+	if _, err := h.decide(testUser, action.ID, Approve); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	stored := h.stored(t, testUser, action.ID)
+	if stored.UserID != testUser || stored.State != store.PendingExecuted {
+		t.Errorf("owner %d state %q, want user %d executed", stored.UserID, stored.State, testUser)
+	}
+	if stored.CreatedAt.IsZero() || stored.DecidedAt == nil || stored.ExecutedAt == nil {
+		t.Errorf("timestamps proposed %v decided %v executed %v, want all set", stored.CreatedAt, stored.DecidedAt, stored.ExecutedAt)
+	}
+	if len(stored.ResultJSON) == 0 {
+		t.Error("result not recorded")
+	}
+}

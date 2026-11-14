@@ -27,4 +27,4 @@
 ## 5. Evals
 
 - [ ] 5.1 `evals/approval/` scenarios: typed "yes", model claims approval, injection in tool result, risk claim in args, double approval, cross-user approval attempt (two seeded users). Runner executes against a real model via the proxy and asserts zero unapproved critical executions. Test: `go test -tags eval ./evals/...` passes against both the `cheap` and `strong` aliases.
-- [ ] 5.2 Run `openspec validate add-tool-approval-gate --strict` and `go test ./...` green.
+- [x] 5.2 Run `openspec validate add-tool-approval-gate --strict` and `go test ./...` green.
