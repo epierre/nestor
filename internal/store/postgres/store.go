@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -284,6 +285,58 @@ func (s *Store) ProposeAction(ctx context.Context, user identity.UserID, action 
 		return fmt.Errorf("propose action: %w", err)
 	}
 	return nil
+}
+
+// GetPendingAction implements store.Store.
+func (s *Store) GetPendingAction(ctx context.Context, user identity.UserID, id string) (store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return store.PendingAction{}, err
+	}
+	var (
+		action     store.PendingAction
+		argsJSON   string
+		resultJSON *string
+	)
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, user_id, tool_name, args_json::text, args_hash, preview, state, created_at,
+			expires_at, decided_at, executed_at, result_json::text, error
+		FROM pending_actions
+		WHERE id = $1 AND user_id = $2`,
+		id, user).Scan(&action.ID, &action.UserID, &action.ToolName, &argsJSON, &action.ArgsHash,
+		&action.Preview, &action.State, &action.CreatedAt, &action.ExpiresAt, &action.DecidedAt,
+		&action.ExecutedAt, &resultJSON, &action.Error)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.PendingAction{}, store.ErrActionNotFound
+	}
+	if err != nil {
+		return store.PendingAction{}, fmt.Errorf("get pending action: %w", err)
+	}
+	action.ArgsJSON = json.RawMessage(argsJSON)
+	if resultJSON != nil {
+		action.ResultJSON = json.RawMessage(*resultJSON)
+	}
+	return action, nil
+}
+
+// UpdatePendingAction implements store.Store. The state check and the change are one statement,
+// so two decisions cannot both move the same action.
+func (s *Store) UpdatePendingAction(ctx context.Context, user identity.UserID, id, from string, update store.PendingUpdate) (bool, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return false, err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions
+		SET state = $4,
+			decided_at = COALESCE($5::timestamptz, decided_at),
+			executed_at = COALESCE($6::timestamptz, executed_at),
+			result_json = COALESCE($7::json, result_json),
+			error = CASE WHEN $8::text = '' THEN error ELSE $8::text END
+		WHERE id = $1 AND user_id = $2 AND state = $3`,
+		id, user, from, update.State, update.DecidedAt, update.ExecutedAt, update.ResultJSON, update.Error)
+	if err != nil {
+		return false, fmt.Errorf("update pending action: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // conversationError turns the composite foreign key's refusal into ErrConversationNotFound.

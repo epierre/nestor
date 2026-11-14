@@ -93,20 +93,42 @@ type ToolCall struct {
 // listed so the stored states match the design.
 const (
 	PendingProposed = "proposed"
+	PendingApproved = "approved"
+	PendingRejected = "rejected"
+	PendingExecuted = "executed"
+	PendingFailed   = "failed"
+	PendingExpired  = "expired"
 )
+
+// ErrActionNotFound is returned when a pending action does not exist or belongs to another user.
+// The two are not told apart.
+var ErrActionNotFound = errors.New("pending action not found")
 
 // PendingAction is a critical tool call waiting for its user's approval. ArgsJSON is the exact
 // text that ArgsHash covers.
 type PendingAction struct {
-	ID        string
-	UserID    identity.UserID
-	ToolName  string
-	ArgsJSON  json.RawMessage
-	ArgsHash  string
-	Preview   string
-	State     string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	ID         string
+	UserID     identity.UserID
+	ToolName   string
+	ArgsJSON   json.RawMessage
+	ArgsHash   string
+	Preview    string
+	State      string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	DecidedAt  *time.Time // nil until the user or the clock decides
+	ExecutedAt *time.Time // nil until the tool has run, or failed to
+	ResultJSON json.RawMessage
+	Error      string
+}
+
+// PendingUpdate sets the fields that a decision changes. A nil time leaves the stored one alone.
+type PendingUpdate struct {
+	State      string
+	DecidedAt  *time.Time
+	ExecutedAt *time.Time
+	ResultJSON json.RawMessage
+	Error      string
 }
 
 // Store persists conversations, messages and model calls. Every method takes the user ID
@@ -123,6 +145,11 @@ type Store interface {
 	RecordToolCall(ctx context.Context, user identity.UserID, call ToolCall) error
 	// ProposeAction stores a new pending action owned by user.
 	ProposeAction(ctx context.Context, user identity.UserID, action PendingAction) error
+	// GetPendingAction returns one of the user's pending actions, or ErrActionNotFound.
+	GetPendingAction(ctx context.Context, user identity.UserID, id string) (PendingAction, error)
+	// UpdatePendingAction applies update only while the user's action is in state from. It
+	// reports false when it is in another state, which is how a repeated decision loses the race.
+	UpdatePendingAction(ctx context.Context, user identity.UserID, id, from string, update PendingUpdate) (bool, error)
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's

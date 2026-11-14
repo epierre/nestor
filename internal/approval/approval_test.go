@@ -10,73 +10,118 @@ import (
 	"time"
 
 	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
 )
 
 var actionID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-func noopSender(context.Context, identity.UserID, string) error { return nil }
+const testTTL = 24 * time.Hour
 
-func TestProposeStoresPendingAction(t *testing.T) {
-	const user identity.UserID = 1
-	ctx := identity.WithUser(context.Background(), user)
-	st := testutil.NewFakeStore()
-	tool := tools.NewNotifySelfTool(noopSender)
-	args := json.RawMessage(`{"text": "Dentist at 3pm"}`)
-	ttl := 24 * time.Hour
+var (
+	testArgs = json.RawMessage(`{"text": "Dentist at 3pm"}`)
+	testUser = identity.UserID(1)
+	other    = identity.UserID(2)
+)
 
-	g := New(st, ttl)
-	action, err := g.Propose(ctx, user, tool, args)
+// harness wires a Gate to a fake store and a registry holding notify_self, which counts its sends.
+type harness struct {
+	st    *testutil.FakeStore
+	gate  *Gate
+	tool  tools.Tool
+	now   time.Time
+	sends int
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	h := &harness{st: testutil.NewFakeStore(), now: time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)}
+	reg := tools.NewRegistry()
+	sender := func(context.Context, identity.UserID, string) error {
+		h.sends++
+		return nil
+	}
+	if err := reg.Register(tools.NewNotifySelfTool(sender)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	tool, err := reg.Lookup("notify_self")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	h.tool = tool
+	h.gate = New(h.st, reg, testTTL)
+	h.gate.now = func() time.Time { return h.now }
+	return h
+}
+
+func (h *harness) propose(t *testing.T, user identity.UserID) store.PendingAction {
+	t.Helper()
+	action, err := h.gate.Propose(identity.WithUser(context.Background(), user), user, h.tool, testArgs)
 	if err != nil {
 		t.Fatalf("Propose: %v", err)
 	}
+	return action
+}
 
-	preview, err := tool.Preview(args)
+func (h *harness) decide(user identity.UserID, id string, decision Decision) (store.PendingAction, error) {
+	return h.gate.Decide(identity.WithUser(context.Background(), user), user, id, decision)
+}
+
+func (h *harness) stored(t *testing.T, user identity.UserID, id string) store.PendingAction {
+	t.Helper()
+	for _, a := range h.st.PendingActions(user) {
+		if a.ID == id {
+			return a
+		}
+	}
+	t.Fatalf("no stored action %s for user %d", id, user)
+	return store.PendingAction{}
+}
+
+func TestProposeStoresPendingAction(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+
+	stored := h.stored(t, testUser, action.ID)
+	if !actionID.MatchString(stored.ID) {
+		t.Errorf("ID %q is not 32 lowercase hex digits", stored.ID)
+	}
+	if stored.UserID != testUser || stored.ToolName != "notify_self" {
+		t.Errorf("owner or tool: got user %d tool %q", stored.UserID, stored.ToolName)
+	}
+	if string(stored.ArgsJSON) != string(testArgs) {
+		t.Errorf("args: got %s, want %s", stored.ArgsJSON, testArgs)
+	}
+	preview, err := h.tool.Preview(testArgs)
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}
-	stored := st.PendingActions(user)
-	if len(stored) != 1 {
-		t.Fatalf("stored %d pending actions for user, want 1", len(stored))
+	if stored.Preview != preview {
+		t.Errorf("preview: got %q, want %q", stored.Preview, preview)
 	}
-	got := stored[0]
-	if got.ID != action.ID || !actionID.MatchString(got.ID) {
-		t.Errorf("ID: got %q, want the returned ID in 32 lowercase hex digits", got.ID)
+	if stored.State != store.PendingProposed {
+		t.Errorf("state: got %q, want proposed", stored.State)
 	}
-	if got.UserID != user || got.ToolName != "notify_self" {
-		t.Errorf("owner or tool: got user %d tool %q", got.UserID, got.ToolName)
+	if stored.ArgsHash != ArgsHash(testUser, "notify_self", testArgs) {
+		t.Error("args hash does not match ArgsHash(user, tool, args)")
 	}
-	if string(got.ArgsJSON) != string(args) {
-		t.Errorf("args: got %s, want %s", got.ArgsJSON, args)
-	}
-	if got.Preview != preview {
-		t.Errorf("preview: got %q, want %q", got.Preview, preview)
-	}
-	if got.State != "proposed" {
-		t.Errorf("state: got %q, want proposed", got.State)
-	}
-	if got.ArgsHash != ArgsHash(user, "notify_self", args) {
-		t.Errorf("args hash does not match ArgsHash(user, tool, args)")
-	}
-	if got.ExpiresAt.Sub(got.CreatedAt) != ttl {
-		t.Errorf("expiry: got %v after creation, want %v", got.ExpiresAt.Sub(got.CreatedAt), ttl)
+	if stored.ExpiresAt.Sub(stored.CreatedAt) != testTTL {
+		t.Errorf("expiry: got %v after creation, want %v", stored.ExpiresAt.Sub(stored.CreatedAt), testTTL)
 	}
 }
 
 func TestArgsHashBindsUserToolAndArgs(t *testing.T) {
-	const user identity.UserID = 1
-	args := json.RawMessage(`{"text": "Dentist at 3pm"}`)
-	base := ArgsHash(user, "notify_self", args)
+	base := ArgsHash(testUser, "notify_self", testArgs)
 
 	tests := []struct {
 		name string
 		hash string
 	}{
-		{"other user", ArgsHash(2, "notify_self", args)},
-		{"other tool", ArgsHash(user, "other_tool", args)},
-		{"other args", ArgsHash(user, "notify_self", json.RawMessage(`{"text": "Dentist at 4pm"}`))},
-		{"reformatted args", ArgsHash(user, "notify_self", json.RawMessage(`{"text":"Dentist at 3pm"}`))},
+		{"other user", ArgsHash(2, "notify_self", testArgs)},
+		{"other tool", ArgsHash(testUser, "other_tool", testArgs)},
+		{"other args", ArgsHash(testUser, "notify_self", json.RawMessage(`{"text": "Dentist at 4pm"}`))},
+		{"reformatted args", ArgsHash(testUser, "notify_self", json.RawMessage(`{"text":"Dentist at 3pm"}`))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,47 +130,146 @@ func TestArgsHashBindsUserToolAndArgs(t *testing.T) {
 			}
 		})
 	}
-	if ArgsHash(user, "notify_self", args) != base {
+	if ArgsHash(testUser, "notify_self", testArgs) != base {
 		t.Error("hash is not stable for identical input")
 	}
 }
 
 func TestProposeRefusesNonCritical(t *testing.T) {
-	const user identity.UserID = 1
-	ctx := identity.WithUser(context.Background(), user)
-	st := testutil.NewFakeStore()
+	h := newHarness(t)
+	ctx := identity.WithUser(context.Background(), testUser)
 
-	_, err := New(st, time.Hour).Propose(ctx, user, tools.NewCurrentTimeTool(), json.RawMessage(`{}`))
+	_, err := h.gate.Propose(ctx, testUser, tools.NewCurrentTimeTool(), json.RawMessage(`{}`))
 	if !errors.Is(err, ErrNotCritical) {
 		t.Errorf("err = %v, want ErrNotCritical", err)
 	}
-	if n := len(st.PendingActions(user)); n != 0 {
+	if n := len(h.st.PendingActions(testUser)); n != 0 {
 		t.Errorf("stored %d pending actions, want 0", n)
 	}
 }
 
 func TestProposeIDsNotSequential(t *testing.T) {
-	const user identity.UserID = 1
-	ctx := identity.WithUser(context.Background(), user)
-	st := testutil.NewFakeStore()
-	g := New(st, time.Hour)
-	tool := tools.NewNotifySelfTool(noopSender)
-	args := json.RawMessage(`{"text": "Dentist at 3pm"}`)
+	h := newHarness(t)
+	first := h.propose(t, testUser)
+	second := h.propose(t, testUser)
 
-	first, err := g.Propose(ctx, user, tool, args)
-	if err != nil {
-		t.Fatalf("first Propose: %v", err)
-	}
-	second, err := g.Propose(ctx, user, tool, args)
-	if err != nil {
-		t.Fatalf("second Propose: %v", err)
-	}
 	if first.ID == second.ID {
 		t.Fatal("two proposals share an ID")
 	}
 	a, _ := new(big.Int).SetString(first.ID, 16)
 	b, _ := new(big.Int).SetString(second.ID, 16)
-	if new(big.Int).Abs(new(big.Int).Sub(a, b)).Cmp(big.NewInt(1)) == 0 {
+	if new(big.Int).Sub(b, a).CmpAbs(big.NewInt(1)) == 0 {
 		t.Errorf("IDs %s and %s are adjacent", first.ID, second.ID)
+	}
+}
+
+func TestApproveExecutesOnce(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+
+	t.Run("approve executes once", func(t *testing.T) {
+		got, err := h.decide(testUser, action.ID, Approve)
+		if err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+		if got.State != store.PendingExecuted {
+			t.Errorf("state: got %q, want executed", got.State)
+		}
+		if h.sends != 1 {
+			t.Errorf("tool ran %d times, want 1", h.sends)
+		}
+		if stored := h.stored(t, testUser, action.ID); stored.State != store.PendingExecuted || stored.ExecutedAt == nil {
+			t.Errorf("stored state %q executed_at %v, want executed with a time", stored.State, stored.ExecutedAt)
+		}
+	})
+
+	t.Run("double tap executes once", func(t *testing.T) {
+		_, err := h.decide(testUser, action.ID, Approve)
+		if !errors.Is(err, ErrNoPendingAction) {
+			t.Errorf("second tap: err = %v, want ErrNoPendingAction", err)
+		}
+		if h.sends != 1 {
+			t.Errorf("tool ran %d times after double tap, want 1", h.sends)
+		}
+	})
+}
+
+func TestExpiredNotExecuted(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+	h.now = h.now.Add(testTTL + time.Second)
+
+	_, err := h.decide(testUser, action.ID, Approve)
+	if !errors.Is(err, ErrExpired) {
+		t.Errorf("err = %v, want ErrExpired", err)
+	}
+	if h.sends != 0 {
+		t.Errorf("tool ran %d times after expiry, want 0", h.sends)
+	}
+	if state := h.stored(t, testUser, action.ID).State; state != store.PendingExpired {
+		t.Errorf("state: got %q, want expired", state)
+	}
+}
+
+func TestTamperedArgsRefused(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+	h.st.TamperPendingAction(action.ID, json.RawMessage(`{"text": "Pay everyone"}`))
+
+	_, err := h.decide(testUser, action.ID, Approve)
+	if !errors.Is(err, ErrIntegrity) {
+		t.Errorf("err = %v, want ErrIntegrity", err)
+	}
+	if h.sends != 0 {
+		t.Errorf("tool ran %d times on tampered args, want 0", h.sends)
+	}
+	stored := h.stored(t, testUser, action.ID)
+	if stored.State != store.PendingFailed || stored.Error == "" {
+		t.Errorf("stored state %q error %q, want failed with a message", stored.State, stored.Error)
+	}
+}
+
+func TestOtherUsersActionBehavesLikeUnknown(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+
+	t.Run("other user's approval", func(t *testing.T) {
+		_, err := h.decide(other, action.ID, Approve)
+		if !errors.Is(err, ErrNoPendingAction) {
+			t.Errorf("err = %v, want ErrNoPendingAction", err)
+		}
+		if state := h.stored(t, testUser, action.ID).State; state != store.PendingProposed {
+			t.Errorf("owner's action state %q, want proposed", state)
+		}
+	})
+
+	t.Run("stranger callback with unknown ID", func(t *testing.T) {
+		_, err := h.decide(other, "00000000000000000000000000000000", Approve)
+		if !errors.Is(err, ErrNoPendingAction) {
+			t.Errorf("err = %v, want ErrNoPendingAction", err)
+		}
+	})
+
+	if h.sends != 0 {
+		t.Errorf("tool ran %d times for a stranger, want 0", h.sends)
+	}
+}
+
+func TestRejectNeverExecutes(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+
+	got, err := h.decide(testUser, action.ID, Reject)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if got.State != store.PendingRejected {
+		t.Errorf("state: got %q, want rejected", got.State)
+	}
+	if h.sends != 0 {
+		t.Errorf("tool ran %d times after rejection, want 0", h.sends)
+	}
+	if _, err := h.decide(testUser, action.ID, Approve); !errors.Is(err, ErrNoPendingAction) {
+		t.Errorf("approve after reject: err = %v, want ErrNoPendingAction", err)
 	}
 }

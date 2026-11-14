@@ -16,18 +16,46 @@ import (
 	"github.com/epierre/nestor/internal/tools"
 )
 
-// ErrNotCritical is returned when Propose is given a tool that does not need approval.
-var ErrNotCritical = errors.New("tool is not critical")
+var (
+	// ErrNotCritical is returned when Propose is given a tool that does not need approval.
+	ErrNotCritical = errors.New("tool is not critical")
+	// ErrNoPendingAction is returned by Decide when the action is unknown, belongs to another
+	// user, or is no longer pending. The three are not told apart.
+	ErrNoPendingAction = errors.New("this action is no longer pending")
+	// ErrExpired is returned when the user decides after the action's approval window closed.
+	ErrExpired = errors.New("this action has expired")
+	// ErrIntegrity is returned when a pending action's arguments no longer match the hash taken
+	// at proposal. The action is marked failed and nothing runs.
+	ErrIntegrity = errors.New("pending action arguments changed after proposal")
+)
 
-// Gate stores proposed actions for their users to decide on.
-type Gate struct {
-	store store.Store
-	ttl   time.Duration
+// Decision is the user's answer to a pending action.
+type Decision string
+
+// Values of Decision.
+const (
+	Approve Decision = "approve"
+	Reject  Decision = "reject"
+)
+
+// ToolLookup finds the registered tool that a pending action runs. The raw registry implements
+// it. The agent's view does not, since it refuses to execute critical tools.
+type ToolLookup interface {
+	Lookup(name string) (tools.Tool, error)
 }
 
-// New returns a Gate that stores actions in st and expires them ttl after proposal.
-func New(st store.Store, ttl time.Duration) *Gate {
-	return &Gate{store: st, ttl: ttl}
+// Gate stores proposed actions and carries out the user's decisions on them.
+type Gate struct {
+	store store.Store
+	tools ToolLookup
+	ttl   time.Duration
+	now   func() time.Time
+}
+
+// New returns a Gate that stores actions in st, runs them through reg, and expires them ttl after
+// proposal.
+func New(st store.Store, reg ToolLookup, ttl time.Duration) *Gate {
+	return &Gate{store: st, tools: reg, ttl: ttl, now: time.Now}
 }
 
 // Propose stores a pending action for user, running tool with args once approved. The args must
@@ -44,8 +72,7 @@ func (g *Gate) Propose(ctx context.Context, user identity.UserID, tool tools.Too
 	if err != nil {
 		return store.PendingAction{}, err
 	}
-	// Microseconds match what the database keeps, so the stored times equal the returned ones.
-	created := time.Now().UTC().Truncate(time.Microsecond)
+	created := g.instant()
 	action := store.PendingAction{
 		ID:        id,
 		ToolName:  tool.Name(),
@@ -61,6 +88,124 @@ func (g *Gate) Propose(ctx context.Context, user identity.UserID, tool tools.Too
 	}
 	action.UserID = user
 	return action, nil
+}
+
+// Decide applies decision to the user's pending action. Approval runs the tool at most once, with
+// the user in context, and only if the action is unexpired and its arguments still match the hash
+// taken at proposal. The returned action shows the state after the decision.
+func (g *Gate) Decide(ctx context.Context, user identity.UserID, actionID string, decision Decision) (store.PendingAction, error) {
+	if decision != Approve && decision != Reject {
+		return store.PendingAction{}, fmt.Errorf("unknown decision %q", decision)
+	}
+	action, err := g.store.GetPendingAction(ctx, user, actionID)
+	if errors.Is(err, store.ErrActionNotFound) {
+		return store.PendingAction{}, ErrNoPendingAction
+	}
+	if err != nil {
+		return store.PendingAction{}, fmt.Errorf("load pending action: %w", err)
+	}
+	if action.State != store.PendingProposed {
+		return store.PendingAction{}, ErrNoPendingAction
+	}
+	now := g.instant()
+
+	if decision == Reject {
+		return g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
+			State:     store.PendingRejected,
+			DecidedAt: &now,
+		})
+	}
+
+	if !now.Before(action.ExpiresAt) {
+		if _, err := g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
+			State:     store.PendingExpired,
+			DecidedAt: &now,
+		}); err != nil {
+			return store.PendingAction{}, err
+		}
+		return store.PendingAction{}, ErrExpired
+	}
+
+	if ArgsHash(user, action.ToolName, action.ArgsJSON) != action.ArgsHash {
+		if _, err := g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
+			State:     store.PendingFailed,
+			DecidedAt: &now,
+			Error:     ErrIntegrity.Error(),
+		}); err != nil {
+			return store.PendingAction{}, err
+		}
+		return store.PendingAction{}, ErrIntegrity
+	}
+
+	// Claiming the action is the step that makes approval happen once: a second approval finds it
+	// already approved and stops here.
+	claimed, err := g.move(ctx, user, action.ID, store.PendingProposed, store.PendingUpdate{
+		State:     store.PendingApproved,
+		DecidedAt: &now,
+	})
+	if err != nil {
+		return store.PendingAction{}, err
+	}
+	return g.run(ctx, user, claimed)
+}
+
+// run executes an approved action and records the outcome.
+func (g *Gate) run(ctx context.Context, user identity.UserID, action store.PendingAction) (store.PendingAction, error) {
+	tool, err := g.tools.Lookup(action.ToolName)
+	if err != nil {
+		return g.fail(ctx, user, action.ID, fmt.Errorf("look up %s: %w", action.ToolName, err))
+	}
+	res, err := tool.Execute(identity.WithUser(ctx, user), action.ArgsJSON)
+	if err != nil {
+		return g.fail(ctx, user, action.ID, fmt.Errorf("execute %s: %w", action.ToolName, err))
+	}
+	resultJSON, err := json.Marshal(res.Content)
+	if err != nil {
+		return g.fail(ctx, user, action.ID, fmt.Errorf("encode result of %s: %w", action.ToolName, err))
+	}
+	done := g.instant()
+	return g.move(ctx, user, action.ID, store.PendingApproved, store.PendingUpdate{
+		State:      store.PendingExecuted,
+		ExecutedAt: &done,
+		ResultJSON: resultJSON,
+	})
+}
+
+// fail marks an approved action failed and returns the cause as the error.
+func (g *Gate) fail(ctx context.Context, user identity.UserID, id string, cause error) (store.PendingAction, error) {
+	done := g.instant()
+	failed, err := g.move(ctx, user, id, store.PendingApproved, store.PendingUpdate{
+		State:      store.PendingFailed,
+		ExecutedAt: &done,
+		Error:      cause.Error(),
+	})
+	if err != nil {
+		return store.PendingAction{}, err
+	}
+	return failed, cause
+}
+
+// move changes an action's state from from to update.State and returns the stored action. It
+// returns ErrNoPendingAction when the action is no longer in from.
+func (g *Gate) move(ctx context.Context, user identity.UserID, id, from string, update store.PendingUpdate) (store.PendingAction, error) {
+	ok, err := g.store.UpdatePendingAction(ctx, user, id, from, update)
+	if err != nil {
+		return store.PendingAction{}, fmt.Errorf("update pending action: %w", err)
+	}
+	if !ok {
+		return store.PendingAction{}, ErrNoPendingAction
+	}
+	action, err := g.store.GetPendingAction(ctx, user, id)
+	if err != nil {
+		return store.PendingAction{}, fmt.Errorf("reload pending action: %w", err)
+	}
+	return action, nil
+}
+
+// instant returns the current time at the precision the database keeps, so stored times compare
+// equal to the returned ones.
+func (g *Gate) instant() time.Time {
+	return g.now().UTC().Truncate(time.Microsecond)
 }
 
 // ArgsHash returns the hex SHA-256 that binds an action to its user, tool name and exact argument

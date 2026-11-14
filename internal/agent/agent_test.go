@@ -858,7 +858,7 @@ func TestToolDispatch(t *testing.T) {
 		st := testutil.NewFakeStore()
 		opts := testOptions()
 		opts.Tools = reg
-		opts.Approvals = approval.New(st, time.Hour)
+		opts.Approvals = approval.New(st, reg, time.Hour)
 		a := New(client, st, opts)
 
 		reply := send(t, a, 1, "notify me")
@@ -908,7 +908,7 @@ func TestToolDispatch(t *testing.T) {
 		st := testutil.NewFakeStore()
 		opts := testOptions()
 		opts.Tools = reg
-		opts.Approvals = approval.New(st, time.Hour)
+		opts.Approvals = approval.New(st, reg, time.Hour)
 		a := New(client, st, opts)
 
 		send(t, a, 1, "do it")

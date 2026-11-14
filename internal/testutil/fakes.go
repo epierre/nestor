@@ -336,3 +336,67 @@ func (s *FakeStore) PendingActions(user identity.UserID) []store.PendingAction {
 	}
 	return found
 }
+
+// GetPendingAction implements store.Store.
+func (s *FakeStore) GetPendingAction(ctx context.Context, user identity.UserID, id string) (store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return store.PendingAction{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.actionIndex(user, id)
+	if i < 0 {
+		return store.PendingAction{}, store.ErrActionNotFound
+	}
+	return s.actions[i], nil
+}
+
+// UpdatePendingAction implements store.Store.
+func (s *FakeStore) UpdatePendingAction(ctx context.Context, user identity.UserID, id, from string, update store.PendingUpdate) (bool, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.actionIndex(user, id)
+	if i < 0 || s.actions[i].State != from {
+		return false, nil
+	}
+	a := &s.actions[i]
+	a.State = update.State
+	if update.DecidedAt != nil {
+		a.DecidedAt = update.DecidedAt
+	}
+	if update.ExecutedAt != nil {
+		a.ExecutedAt = update.ExecutedAt
+	}
+	if update.ResultJSON != nil {
+		a.ResultJSON = update.ResultJSON
+	}
+	if update.Error != "" {
+		a.Error = update.Error
+	}
+	return true, nil
+}
+
+// TamperPendingAction replaces a stored action's arguments without touching its hash, as someone
+// editing the database directly would.
+func (s *FakeStore) TamperPendingAction(id string, args json.RawMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.actions {
+		if s.actions[i].ID == id {
+			s.actions[i].ArgsJSON = args
+		}
+	}
+}
+
+// actionIndex returns the position of user's action id, or -1. The caller holds s.mu.
+func (s *FakeStore) actionIndex(user identity.UserID, id string) int {
+	for i, a := range s.actions {
+		if a.ID == id && a.UserID == user {
+			return i
+		}
+	}
+	return -1
+}
