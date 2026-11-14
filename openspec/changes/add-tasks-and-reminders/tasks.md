@@ -18,7 +18,7 @@
 
 ## 4. Configuration and wiring
 
-- [ ] 4.1 `TIMEZONE` config (default `UTC`), loaded with `time.LoadLocation`. Test: `config_test.go` "timezone default UTC", "invalid timezone names the variable".
+- [ ] 4.1 `TIMEZONE` config (default `Europe/Zurich`), loaded with `time.LoadLocation`. Test: `config_test.go` "timezone default Europe/Zurich", "invalid timezone names the variable".
 - [ ] 4.2 `cmd/nestor` registers the task and reminder tools and starts the scheduler; compose passes `TIMEZONE` to the container. Test: `main_test.go` "task and reminder tools always registered"; `docker compose config` valid.
 
 ## 5. Verification

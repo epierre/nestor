@@ -20,8 +20,8 @@ The system SHALL send a reminder's text to the chat it was created in once it is
 The system SHALL read reminder times in the configured `TIMEZONE`, refuse times that are in the past or cannot be parsed, and show due times in that zone.
 
 #### Scenario: Time read in the configured zone
-- **WHEN** the model creates a reminder for "15:00" with `TIMEZONE` set to Europe/Paris
-- **THEN** the reminder is due at 15:00 in Europe/Paris
+- **WHEN** the model creates a reminder for "15:00" with `TIMEZONE` at its default, Europe/Zurich
+- **THEN** the reminder is due at 15:00 in Europe/Zurich
 
 #### Scenario: Past time refused
 - **WHEN** the model creates a reminder for a time already past

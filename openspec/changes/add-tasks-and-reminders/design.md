@@ -47,7 +47,7 @@ and marking it delivered fails; this is logged.
 
 ## Time
 
-Reminder times are stored as UTC instants. `TIMEZONE` is loaded with `time.LoadLocation` at startup;
+Reminder times are stored as UTC instants. `TIMEZONE` defaults to `Europe/Zurich` and is loaded with `time.LoadLocation` at startup;
 an invalid name stops the process with a message naming the variable. Replies show times in that
 zone.
 

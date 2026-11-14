@@ -16,7 +16,7 @@ approval gate for the first time against user data rather than a demo.
 - A scheduler, running in the entrypoint, that delivers each reminder when it is due: the text is
   sent to the chat the reminder was created in, then the reminder is marked delivered. A failed send
   is retried at the next tick.
-- A `TIMEZONE` setting (IANA name, default `UTC`) used to read and show reminder times.
+- A `TIMEZONE` setting (IANA name, default `Europe/Zurich`) used to read and show reminder times.
 
 ## Depends on
 
