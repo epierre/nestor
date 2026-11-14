@@ -22,7 +22,7 @@ The system SHALL add only the name and description of each skill enabled for the
 
 #### Scenario: Skill loaded on demand
 - **WHEN** the model calls `load_skill` with `weekly-review` for a user who has it enabled
-- **THEN** the model receives the body of `SKILL.md` as a tool result
+- **THEN** the model receives the body of `SKILL.md` as a tool result, and the tool call log records the call with user ID, skill name and result size
 
 ### Requirement: Per-user enablement
 The system SHALL offer and load a skill only for users it is enabled for, and SHALL answer requests for any other skill as if it did not exist.
@@ -53,8 +53,8 @@ The system SHALL run a skill script only if scripts are enabled for that skill, 
 - **THEN** nothing runs and the model receives an error result
 
 #### Scenario: Script tries the network
-- **WHEN** a bundled script attempts an HTTP request
-- **THEN** the request fails inside the sandbox and the run completes or fails without any network access having occurred
+- **WHEN** a bundled script attempts an HTTP request to a public host
+- **THEN** the request fails with a network error inside the sandbox, the run is recorded with the script's exit status, and the model receives that output as an untrusted tool message
 
 #### Scenario: Script exceeds timeout
 - **WHEN** a script runs longer than its configured timeout
