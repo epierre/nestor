@@ -290,7 +290,8 @@ func (s *Store) ProposeAction(ctx context.Context, user identity.UserID, action 
 
 // pendingColumns lists the columns that scanPending reads, in its order.
 const pendingColumns = `id, user_id, tool_name, args_json::text, args_hash, preview, state, created_at,
-	expires_at, decided_at, executed_at, result_json::text, error, superseded_by, card_sent_at`
+	expires_at, decided_at, executed_at, result_json::text, error, superseded_by, card_sent_at,
+	notify_chat_id, outcome_notice_sent_at`
 
 // scanPending reads one row of pendingColumns.
 func scanPending(row pgx.Row) (store.PendingAction, error) {
@@ -299,10 +300,12 @@ func scanPending(row pgx.Row) (store.PendingAction, error) {
 		argsJSON   string
 		resultJSON *string
 		supersede  *string
+		chatID     *int64
 	)
 	err := row.Scan(&action.ID, &action.UserID, &action.ToolName, &argsJSON, &action.ArgsHash,
 		&action.Preview, &action.State, &action.CreatedAt, &action.ExpiresAt, &action.DecidedAt,
-		&action.ExecutedAt, &resultJSON, &action.Error, &supersede, &action.CardSentAt)
+		&action.ExecutedAt, &resultJSON, &action.Error, &supersede, &action.CardSentAt,
+		&chatID, &action.OutcomeNoticeSentAt)
 	if err != nil {
 		return store.PendingAction{}, err
 	}
@@ -312,6 +315,9 @@ func scanPending(row pgx.Row) (store.PendingAction, error) {
 	}
 	if supersede != nil {
 		action.SupersededBy = *supersede
+	}
+	if chatID != nil {
+		action.NotifyChatID = *chatID
 	}
 	return action, nil
 }
@@ -350,14 +356,15 @@ func (s *Store) SupersedePending(ctx context.Context, user identity.UserID, tool
 	return tag.RowsAffected(), nil
 }
 
-// MarkCardSent implements store.Store.
-func (s *Store) MarkCardSent(ctx context.Context, user identity.UserID, id string, at time.Time) error {
+// MarkCardSent implements store.Store. A chatID of 0 records no chat.
+func (s *Store) MarkCardSent(ctx context.Context, user identity.UserID, id string, chatID int64, at time.Time) error {
 	if err := store.RequireUser(ctx, user); err != nil {
 		return err
 	}
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE pending_actions SET card_sent_at = $3
-		WHERE id = $1 AND user_id = $2`, id, user, at)
+		UPDATE pending_actions
+		SET card_sent_at = $3, notify_chat_id = NULLIF($4::bigint, 0)
+		WHERE id = $1 AND user_id = $2`, id, user, at, chatID)
 	if err != nil {
 		return fmt.Errorf("mark card sent: %w", err)
 	}
@@ -417,16 +424,74 @@ func (s *Store) UpdatePendingAction(ctx context.Context, user identity.UserID, i
 }
 
 // FailStaleApprovals implements store.Store. It is deliberately unscoped: see the interface.
-func (s *Store) FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `
+func (s *Store) FailStaleApprovals(ctx context.Context, cutoff time.Time) ([]store.FailedApproval, error) {
+	rows, err := s.pool.Query(ctx, `
 		UPDATE pending_actions
 		SET state = 'failed', error = $2
-		WHERE state = 'approved' AND decided_at < $1`,
-		cutoff, message)
+		WHERE state = 'approved' AND decided_at < $1
+		RETURNING id, user_id, preview, COALESCE(notify_chat_id, 0)`,
+		cutoff, store.OutcomeUnknownError)
 	if err != nil {
-		return 0, fmt.Errorf("fail stale approvals: %w", err)
+		return nil, fmt.Errorf("fail stale approvals: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	defer rows.Close()
+	var failed []store.FailedApproval
+	for rows.Next() {
+		var f store.FailedApproval
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Preview, &f.ChatID); err != nil {
+			return nil, fmt.Errorf("scan failed approval: %w", err)
+		}
+		failed = append(failed, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("fail stale approvals: %w", err)
+	}
+	return failed, nil
+}
+
+// UnnotifiedOutcomes implements store.Store.
+func (s *Store) UnnotifiedOutcomes(ctx context.Context, user identity.UserID) ([]store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+pendingColumns+`
+		FROM pending_actions
+		WHERE user_id = $1 AND state = 'failed' AND error = $2 AND outcome_notice_sent_at IS NULL
+		ORDER BY decided_at`, user, store.OutcomeUnknownError)
+	if err != nil {
+		return nil, fmt.Errorf("list unnotified outcomes: %w", err)
+	}
+	defer rows.Close()
+	var found []store.PendingAction
+	for rows.Next() {
+		action, err := scanPending(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan unnotified outcome: %w", err)
+		}
+		found = append(found, action)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list unnotified outcomes: %w", err)
+	}
+	return found, nil
+}
+
+// MarkOutcomeNoticed implements store.Store.
+func (s *Store) MarkOutcomeNoticed(ctx context.Context, user identity.UserID, id string, at time.Time) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions SET outcome_notice_sent_at = $3
+		WHERE id = $1 AND user_id = $2`, id, user, at)
+	if err != nil {
+		return fmt.Errorf("mark outcome noticed: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return store.ErrActionNotFound
+	}
+	return nil
 }
 
 // conversationError turns the composite foreign key's refusal into ErrConversationNotFound.

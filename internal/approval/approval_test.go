@@ -292,7 +292,7 @@ func TestStaleApprovedFailedAsUnknown(t *testing.T) {
 	action := h.propose(t, testUser)
 	h.approveButStall(t, testUser, action.ID)
 
-	n, err := SweepStale(context.Background(), h.st, h.now.Add(10*time.Minute), 5*time.Minute)
+	n, err := SweepStale(context.Background(), h.st, nil, h.now.Add(10*time.Minute), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("SweepStale: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestFreshApprovedLeftAlone(t *testing.T) {
 	action := h.propose(t, testUser)
 	h.approveButStall(t, testUser, action.ID)
 
-	n, err := SweepStale(context.Background(), h.st, h.now.Add(time.Minute), 5*time.Minute)
+	n, err := SweepStale(context.Background(), h.st, nil, h.now.Add(time.Minute), 5*time.Minute)
 	if err != nil {
 		t.Fatalf("SweepStale: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestStaleApprovedNeverReExecuted(t *testing.T) {
 	h := newHarness(t)
 	action := h.propose(t, testUser)
 	h.approveButStall(t, testUser, action.ID)
-	if _, err := SweepStale(context.Background(), h.st, h.now.Add(10*time.Minute), 5*time.Minute); err != nil {
+	if _, err := SweepStale(context.Background(), h.st, nil, h.now.Add(10*time.Minute), 5*time.Minute); err != nil {
 		t.Fatalf("SweepStale: %v", err)
 	}
 
@@ -448,7 +448,7 @@ func TestUnsentCardsAreRetriedUntilMarked(t *testing.T) {
 	if len(unsent) != 1 || unsent[0].ID != action.ID {
 		t.Fatalf("unsent %+v, want the new action", unsent)
 	}
-	if err := h.st.MarkCardSent(ctx, testUser, action.ID, h.now); err != nil {
+	if err := h.st.MarkCardSent(ctx, testUser, action.ID, 0, h.now); err != nil {
 		t.Fatalf("MarkCardSent: %v", err)
 	}
 	unsent, _ = h.st.UnsentCards(ctx, testUser, h.now)
@@ -503,5 +503,97 @@ func TestExecutedActionKeepsItsAuditTrail(t *testing.T) {
 	}
 	if len(stored.ResultJSON) == 0 {
 		t.Error("result not recorded")
+	}
+}
+
+// fakeNotifier records the notices sent to chats, and fails them when err is set.
+type fakeNotifier struct {
+	sent []notice
+	err  error
+}
+
+type notice struct {
+	chat int64
+	text string
+}
+
+func (f *fakeNotifier) Notify(_ context.Context, chatID int64, text string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.sent = append(f.sent, notice{chat: chatID, text: text})
+	return nil
+}
+
+// stallWithCard proposes an action, records its card in chat, and leaves it approved without an
+// outcome, as a crash after the claim would.
+func (h *harness) stallWithCard(t *testing.T, user identity.UserID, chat int64) store.PendingAction {
+	t.Helper()
+	action := h.propose(t, user)
+	ctx := identity.WithUser(context.Background(), user)
+	if err := h.st.MarkCardSent(ctx, user, action.ID, chat, h.now); err != nil {
+		t.Fatalf("MarkCardSent: %v", err)
+	}
+	h.approveButStall(t, user, action.ID)
+	return action
+}
+
+func TestStaleApprovalNoticeSentToCardChat(t *testing.T) {
+	h := newHarness(t)
+	action := h.stallWithCard(t, testUser, 900)
+	notifier := &fakeNotifier{}
+
+	if _, err := SweepStale(context.Background(), h.st, notifier, h.now.Add(10*time.Minute), 5*time.Minute); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+
+	if len(notifier.sent) != 1 || notifier.sent[0].chat != 900 {
+		t.Fatalf("notices %+v, want one to the card chat 900", notifier.sent)
+	}
+	text := notifier.sent[0].text
+	if !strings.Contains(text, "Notify yourself: Dentist at 3pm") || !strings.Contains(text, "Outcome unknown") {
+		t.Errorf("notice %q, want the preview and that the outcome is unknown", text)
+	}
+	if notes := h.systemNotes(t, testUser); len(notes) != 1 || !strings.Contains(notes[0], action.ID) {
+		t.Errorf("conversation notes %q, want one note naming the action", notes)
+	}
+	if got := h.stored(t, testUser, action.ID); got.OutcomeNoticeSentAt == nil {
+		t.Error("notice delivered but not marked as sent")
+	}
+}
+
+func TestNoChatRecordedGetsNoteOnly(t *testing.T) {
+	h := newHarness(t)
+	action := h.propose(t, testUser)
+	h.approveButStall(t, testUser, action.ID)
+	notifier := &fakeNotifier{}
+
+	if _, err := SweepStale(context.Background(), h.st, notifier, h.now.Add(10*time.Minute), 5*time.Minute); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+
+	if len(notifier.sent) != 0 {
+		t.Errorf("sent %+v with no chat recorded, want nothing", notifier.sent)
+	}
+	if notes := h.systemNotes(t, testUser); len(notes) != 1 {
+		t.Errorf("conversation notes %q, want the note", notes)
+	}
+}
+
+func TestFailedNoticeStaysUnnotified(t *testing.T) {
+	h := newHarness(t)
+	action := h.stallWithCard(t, testUser, 900)
+	notifier := &fakeNotifier{err: errors.New("telegram down")}
+
+	if _, err := SweepStale(context.Background(), h.st, notifier, h.now.Add(10*time.Minute), 5*time.Minute); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+
+	if got := h.stored(t, testUser, action.ID); got.State != store.PendingFailed || got.OutcomeNoticeSentAt != nil {
+		t.Errorf("state %q noticed %v, want failed and not noticed", got.State, got.OutcomeNoticeSentAt)
+	}
+	ctx := identity.WithUser(context.Background(), testUser)
+	if waiting, _ := h.st.UnnotifiedOutcomes(ctx, testUser); len(waiting) != 1 {
+		t.Errorf("unnotified outcomes %+v, want the failed notice kept for the next message", waiting)
 	}
 }

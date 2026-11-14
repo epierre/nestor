@@ -29,8 +29,8 @@ them, the same way it re-sends cards (task 4.4).
 
 ## Interfaces
 
-- `approval.Notifier`: `Send(ctx, chatID int64, text string) error`. `telegram.Channel.Send`
-  already matches it.
+- `approval.Notifier`: `Notify(ctx, chatID int64, text string) error`, one attempt. The Telegram
+  channel implements it; the sweep must not hold up on Telegram retries.
 - Agent options gain `Notices`, the same pattern as `Cards`: it sends outcome notices. It is
   optional; without it, notices are not re-sent.
 
