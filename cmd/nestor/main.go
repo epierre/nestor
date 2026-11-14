@@ -11,11 +11,13 @@ import (
 	"syscall"
 
 	"github.com/epierre/nestor/internal/agent"
+	"github.com/epierre/nestor/internal/approval"
 	"github.com/epierre/nestor/internal/channel/telegram"
 	"github.com/epierre/nestor/internal/config"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store/postgres"
+	"github.com/epierre/nestor/internal/tools"
 )
 
 const (
@@ -49,9 +51,20 @@ func run() error {
 		return err
 	}
 
+	// Stale approvals are failed at startup and then every stale-after interval, so none stays
+	// approved for longer than about two intervals.
+	go approval.RunSweeps(ctx, st, cfg.ApprovalStaleAfter, cfg.ApprovalStaleAfter)
+
 	client := model.NewClient(cfg.LLMBaseURL, cfg.LLMAPIKey)
-	assistant := agent.New(client, st, agentOptions(cfg))
 	bot := telegram.New(cfg.TelegramBotToken, st)
+	// No tools are registered yet, so the gate can only decide actions the agent proposes, and it
+	// proposes none. The wiring is in place for when critical tools arrive.
+	gate := approval.New(st, tools.NewRegistry(), cfg.ApprovalTTL)
+	bot.SetDecider(gate)
+	opts := agentOptions(cfg)
+	opts.Approvals = gate
+	opts.Cards = bot
+	assistant := agent.New(client, st, opts)
 
 	slog.Info("nestor started", "model", cfg.LLMModel, "allowed_users", len(cfg.AllowedTelegramUsers))
 	err = bot.Run(ctx, assistant)

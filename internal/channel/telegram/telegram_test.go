@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,8 +18,10 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/epierre/nestor/internal/approval"
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
 )
 
@@ -38,6 +41,8 @@ type botAPI struct {
 	offsets   []int64
 	limits    []int
 	sent      []sentMessage
+	markups   []string // reply_markup of each sent message, raw JSON, "" when none
+	answers   []string // text of each answered callback query
 	pollTimes []time.Time
 	failPolls int // getUpdates calls left to answer with 502
 	failSends int // sendMessage calls left to answer with sendCode
@@ -55,6 +60,7 @@ func newBotAPI(t *testing.T, updates ...update) *botAPI {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /bot"+testToken+"/getUpdates", api.getUpdates)
 	mux.HandleFunc("POST /bot"+testToken+"/sendMessage", api.sendMessage)
+	mux.HandleFunc("POST /bot"+testToken+"/answerCallbackQuery", api.answerCallbackQuery)
 	api.Server = httptest.NewServer(mux)
 	t.Cleanup(api.Close)
 	return api
@@ -93,7 +99,10 @@ func (b *botAPI) getUpdates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *botAPI) sendMessage(w http.ResponseWriter, r *http.Request) {
-	var msg sentMessage
+	var msg struct {
+		sentMessage
+		ReplyMarkup json.RawMessage `json:"reply_markup"`
+	}
 	json.NewDecoder(r.Body).Decode(&msg)
 
 	b.mu.Lock()
@@ -104,8 +113,27 @@ func (b *botAPI) sendMessage(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": b.sendCode, "description": "refused"})
 		return
 	}
-	b.sent = append(b.sent, msg)
+	b.sent = append(b.sent, msg.sentMessage)
+	b.markups = append(b.markups, string(msg.ReplyMarkup))
 	json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{}})
+}
+
+func (b *botAPI) answerCallbackQuery(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Text string `json:"text"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.answers = append(b.answers, req.Text)
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": true})
+}
+
+func (b *botAPI) answered() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string{}, b.answers...)
 }
 
 func (b *botAPI) sentTexts() []string {
@@ -134,6 +162,15 @@ func textUpdate(id int64, from int64, text string) update {
 		Text: text,
 		From: &sender{ID: from},
 		Chat: chat{ID: chatID},
+	}}
+}
+
+func callbackUpdate(id int64, from int64, chatID int64, data string) update {
+	return update{UpdateID: id, CallbackQuery: &callbackQuery{
+		ID:      "cb-" + strconv.FormatInt(id, 10),
+		From:    &sender{ID: from},
+		Message: &message{Chat: chat{ID: chatID}},
+		Data:    data,
 	}}
 }
 
@@ -606,5 +643,178 @@ func TestEmptyReplySendsNothing(t *testing.T) {
 
 	if got := api.sentTexts(); len(got) != 0 {
 		t.Errorf("sent %q", got)
+	}
+}
+
+// fakeDecider records the decisions it is asked to make and answers with result and err.
+type fakeDecider struct {
+	mu     sync.Mutex
+	calls  []decideCall
+	result store.PendingAction
+	err    error
+}
+
+type decideCall struct {
+	user     identity.UserID
+	actionID string
+	decision approval.Decision
+}
+
+func (d *fakeDecider) Decide(ctx context.Context, user identity.UserID, actionID string, decision approval.Decision) (store.PendingAction, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls = append(d.calls, decideCall{user: user, actionID: actionID, decision: decision})
+	return d.result, d.err
+}
+
+func (d *fakeDecider) made() []decideCall {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]decideCall{}, d.calls...)
+}
+
+func TestApprovalCardContainsPreviewAndButtons(t *testing.T) {
+	api := newBotAPI(t)
+	c := newChannel(api, knownSender())
+	ctx := withChat(context.Background(), chatID)
+
+	err := c.SendApprovalCard(ctx, store.PendingAction{ID: "abc123", Preview: "Notify yourself: Dentist at 3pm"})
+	if err != nil {
+		t.Fatalf("SendApprovalCard: %v", err)
+	}
+	if len(api.sent) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(api.sent))
+	}
+	if api.sent[0].ChatID != chatID || !strings.Contains(api.sent[0].Text, "Notify yourself: Dentist at 3pm") {
+		t.Errorf("card %+v, want the preview in the chat", api.sent[0])
+	}
+
+	var markup struct {
+		InlineKeyboard [][]struct {
+			Text         string `json:"text"`
+			CallbackData string `json:"callback_data"`
+		} `json:"inline_keyboard"`
+	}
+	if err := json.Unmarshal([]byte(api.markups[0]), &markup); err != nil {
+		t.Fatalf("reply_markup %q: %v", api.markups[0], err)
+	}
+	row := markup.InlineKeyboard[0]
+	if len(row) != 2 || row[0].CallbackData != "approve:abc123" || row[1].CallbackData != "reject:abc123" {
+		t.Errorf("buttons %+v, want Approve and Reject bound to the action", row)
+	}
+}
+
+func TestApprovalCardSentOnlyToActionsUser(t *testing.T) {
+	const (
+		chatA   = 501
+		chatB   = 502
+		senderA = 100
+		senderB = 200
+	)
+	st := testutil.NewFakeStore()
+	st.AddIdentity(platform, strconv.Itoa(senderA), 7)
+	st.AddIdentity(platform, strconv.Itoa(senderB), 8)
+	api := newBotAPI(t,
+		update{UpdateID: 1, Message: &message{Text: "a", From: &sender{ID: senderA}, Chat: chat{ID: chatA}}},
+		update{UpdateID: 2, Message: &message{Text: "b", From: &sender{ID: senderB}, Chat: chat{ID: chatB}}},
+	)
+	c := newChannel(api, st)
+	// Each message proposes an action for the user who sent it, so the card belongs in their chat.
+	proposer := handlerFunc(func(ctx context.Context, text string) (string, error) {
+		user, err := identity.UserFrom(ctx)
+		if err != nil {
+			return "", err
+		}
+		return "", c.SendApprovalCard(ctx, store.PendingAction{ID: "action-" + strconv.Itoa(int(user)), Preview: text})
+	})
+
+	runUntil(t, c, proposer, func() bool { return api.confirmed(2) })
+
+	want := []sentMessage{{ChatID: chatA}, {ChatID: chatB}}
+	if len(api.sent) != len(want) {
+		t.Fatalf("sent %+v, want exactly one card per user", api.sent)
+	}
+	for i := range want {
+		if api.sent[i].ChatID != want[i].ChatID {
+			t.Errorf("card %d went to chat %d, want %d", i, api.sent[i].ChatID, want[i].ChatID)
+		}
+	}
+}
+
+func TestCallbackReachesDecideWithResolvedUserAndActionID(t *testing.T) {
+	api := newBotAPI(t, callbackUpdate(1, senderID, chatID, "approve:abc123"))
+	c := newChannel(api, knownSender())
+	d := &fakeDecider{}
+	c.SetDecider(d)
+
+	runUntil(t, c, echo(), func() bool { return api.confirmed(1) })
+
+	want := []decideCall{{user: internalID, actionID: "abc123", decision: approval.Approve}}
+	if got := d.made(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Decide calls %+v, want %+v", got, want)
+	}
+	if got := api.answered(); !reflect.DeepEqual(got, []string{"Approved."}) {
+		t.Errorf("callback answers %q, want Approved.", got)
+	}
+}
+
+func TestCallbackFromStrangerNeverReachesDecide(t *testing.T) {
+	const stranger = 666
+	api := newBotAPI(t, callbackUpdate(1, stranger, chatID, "approve:abc123"))
+	d := &fakeDecider{}
+	c := newChannel(api, knownSender())
+	c.SetDecider(d)
+
+	runUntil(t, c, echo(), func() bool { return api.confirmed(1) })
+
+	if got := d.made(); len(got) != 0 {
+		t.Errorf("stranger's callback reached Decide: %+v", got)
+	}
+}
+
+func TestOutcomePostedToChat(t *testing.T) {
+	tests := []struct {
+		name     string
+		decision approval.Decision
+		result   store.PendingAction
+		err      error
+		want     string
+	}{
+		{"executed", approval.Approve, store.PendingAction{State: store.PendingExecuted, Preview: "Notify yourself: hi"}, nil,
+			"Done: Notify yourself: hi"},
+		{"rejected", approval.Reject, store.PendingAction{State: store.PendingRejected, Preview: "Notify yourself: hi"}, nil,
+			"Rejected: Notify yourself: hi"},
+		{"expired", approval.Approve, store.PendingAction{State: store.PendingExpired, Preview: "Notify yourself: hi"}, approval.ErrExpired,
+			"Expired, not run: Notify yourself: hi"},
+		{"failed to run", approval.Approve, store.PendingAction{State: store.PendingFailed, Preview: "Notify yourself: hi"}, errors.New("boom"),
+			"Failed: Notify yourself: hi"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newBotAPI(t, callbackUpdate(1, senderID, chatID, string(tt.decision)+":abc123"))
+			c := newChannel(api, knownSender())
+			c.SetDecider(&fakeDecider{result: tt.result, err: tt.err})
+
+			runUntil(t, c, echo(), func() bool { return api.confirmed(1) })
+
+			if got := api.sentTexts(); !reflect.DeepEqual(got, []string{tt.want}) {
+				t.Errorf("chat received %q, want %q", got, tt.want)
+			}
+			if got := api.sent; len(got) == 1 && got[0].ChatID != chatID {
+				t.Errorf("outcome went to chat %d, want %d", got[0].ChatID, chatID)
+			}
+		})
+	}
+}
+
+func TestNoOutcomePostedWhenNoLongerPending(t *testing.T) {
+	api := newBotAPI(t, callbackUpdate(1, senderID, chatID, "approve:abc123"))
+	c := newChannel(api, knownSender())
+	c.SetDecider(&fakeDecider{err: approval.ErrNoPendingAction})
+
+	runUntil(t, c, echo(), func() bool { return api.confirmed(1) })
+
+	if got := api.sentTexts(); len(got) != 0 {
+		t.Errorf("chat received %q for an action that was not pending, want nothing", got)
 	}
 }

@@ -7,12 +7,15 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
-	defaultLLMModel          = "cheap"
-	defaultHistoryLimit      = 30
-	defaultMaxLoopIterations = 8
+	defaultLLMModel           = "cheap"
+	defaultHistoryLimit       = 30
+	defaultMaxLoopIterations  = 8
+	defaultApprovalTTL        = 24 * time.Hour
+	defaultApprovalStaleAfter = 5 * time.Minute
 )
 
 // TelegramUser is one entry of the ALLOWED_TELEGRAM_USERS allowlist.
@@ -32,6 +35,12 @@ type Config struct {
 	LLMModel             string
 	HistoryLimit         int
 	MaxLoopIterations    int
+	EnableDemoTools      bool
+	// ApprovalTTL is how long a proposed action waits for its user's decision.
+	ApprovalTTL time.Duration
+	// ApprovalStaleAfter is how long an action may sit approved before it is failed as outcome
+	// unknown.
+	ApprovalStaleAfter time.Duration
 }
 
 // Load reads the configuration through getenv and reports every invalid or missing variable at
@@ -57,15 +66,42 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		return n
 	}
+	duration := func(name string, fallback time.Duration) time.Duration {
+		value := get(name)
+		if value == "" {
+			return fallback
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil || d <= 0 {
+			errs = append(errs, fmt.Errorf("%s must be a positive duration such as 5m", name))
+			return fallback
+		}
+		return d
+	}
+	boolean := func(name string, fallback bool) bool {
+		value := get(name)
+		if value == "" {
+			return fallback
+		}
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s must be a boolean", name))
+			return fallback
+		}
+		return b
+	}
 
 	cfg := Config{
-		TelegramBotToken:  required("TELEGRAM_BOT_TOKEN"),
-		DatabaseURL:       required("DATABASE_URL"),
-		LLMBaseURL:        required("LLM_BASE_URL"),
-		LLMAPIKey:         required("LLM_API_KEY"),
-		LLMModel:          get("LLM_MODEL"),
-		HistoryLimit:      positiveInt("HISTORY_LIMIT", defaultHistoryLimit),
-		MaxLoopIterations: positiveInt("MAX_LOOP_ITERATIONS", defaultMaxLoopIterations),
+		TelegramBotToken:   required("TELEGRAM_BOT_TOKEN"),
+		DatabaseURL:        required("DATABASE_URL"),
+		LLMBaseURL:         required("LLM_BASE_URL"),
+		LLMAPIKey:          required("LLM_API_KEY"),
+		LLMModel:           get("LLM_MODEL"),
+		HistoryLimit:       positiveInt("HISTORY_LIMIT", defaultHistoryLimit),
+		MaxLoopIterations:  positiveInt("MAX_LOOP_ITERATIONS", defaultMaxLoopIterations),
+		EnableDemoTools:    boolean("ENABLE_DEMO_TOOLS", false),
+		ApprovalTTL:        duration("APPROVAL_TTL", defaultApprovalTTL),
+		ApprovalStaleAfter: duration("APPROVAL_STALE_AFTER", defaultApprovalStaleAfter),
 	}
 	if cfg.LLMModel == "" {
 		cfg.LLMModel = defaultLLMModel

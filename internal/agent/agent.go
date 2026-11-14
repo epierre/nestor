@@ -2,15 +2,18 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store"
+	"github.com/epierre/nestor/internal/tools"
 )
 
 const (
@@ -23,12 +26,35 @@ const (
 	toolsUnavailable = "error: no tools are available"
 )
 
+// ToolRegistry looks up tools and lists them for the model.
+type ToolRegistry interface {
+	Tools() []model.Tool
+	Lookup(name string) (tools.Tool, error)
+	Validate(name string, args json.RawMessage) error
+}
+
+// Approvals holds critical tool calls until their user decides on them. approval.Gate implements it.
+type Approvals interface {
+	Propose(ctx context.Context, user identity.UserID, tool tools.Tool, args json.RawMessage) (store.PendingAction, error)
+}
+
+// CardSender shows a pending action to its user. An error leaves the action pending: its card is
+// sent again later.
+type CardSender interface {
+	SendApprovalCard(ctx context.Context, action store.PendingAction) error
+}
+
 // Options configures an Agent.
 type Options struct {
 	Model         string // proxy alias
 	SystemPrompt  string
 	HistoryLimit  int // messages of the conversation sent to the model
 	MaxIterations int // model calls allowed for one message
+	Tools         ToolRegistry
+	// Approvals takes critical tool calls. Without it, critical calls are refused.
+	Approvals Approvals
+	// Cards shows each proposed action to its user. Without it, proposed actions have no card.
+	Cards CardSender
 }
 
 // Agent runs the conversation loop for one message at a time.
@@ -40,6 +66,9 @@ type Agent struct {
 
 // New returns an Agent using client and st.
 func New(client model.ModelClient, st store.Store, opts Options) *Agent {
+	if reg, ok := opts.Tools.(*tools.Registry); ok {
+		opts.Tools = reg.AgentView()
+	}
 	return &Agent{client: client, store: st, opts: opts}
 }
 
@@ -59,6 +88,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 		}
 		return noticeNewConversation, nil
 	}
+	a.resendCards(ctx, user)
 	conversation, err := a.store.ActiveConversation(ctx, user)
 	if err != nil {
 		return "", fmt.Errorf("load conversation: %w", err)
@@ -72,8 +102,17 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 	}
 
 	messages := a.prompt(history)
+	var modelTools []model.Tool
+	if a.opts.Tools != nil {
+		modelTools = a.opts.Tools.Tools()
+	}
+
 	for range a.opts.MaxIterations {
-		resp, callErr := a.client.Complete(ctx, model.CompletionRequest{Model: a.opts.Model, Messages: messages})
+		resp, callErr := a.client.Complete(ctx, model.CompletionRequest{
+			Model:    a.opts.Model,
+			Messages: messages,
+			Tools:    modelTools,
+		})
 		if err := a.recordCalls(ctx, user, conversation.ID, resp); err != nil {
 			return "", err
 		}
@@ -87,7 +126,15 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 			}
 			return resp.Content, nil
 		}
-		messages = appendToolRefusals(messages, resp)
+		if a.opts.Tools == nil {
+			messages = appendToolRefusals(messages, resp)
+		} else {
+			var err error
+			messages, err = a.dispatchToolCalls(ctx, user, conversation.ID, messages, resp)
+			if err != nil {
+				return "", err
+			}
+		}
 	}
 	slog.WarnContext(ctx, "model call limit reached", "max_iterations", a.opts.MaxIterations)
 	return noticeLoopLimit, nil
@@ -153,6 +200,116 @@ func appendToolRefusals(messages []model.Message, resp model.CompletionResponse)
 		})
 	}
 	return messages
+}
+
+func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, conversationID int64, messages []model.Message, resp model.CompletionResponse) ([]model.Message, error) {
+	messages = append(messages, model.Message{
+		Role:      model.RoleAssistant,
+		ToolCalls: resp.ToolCalls,
+	})
+	for _, call := range resp.ToolCalls {
+		start := time.Now()
+		tool, err := a.opts.Tools.Lookup(call.Name)
+		var (
+			content    string
+			status     string
+			risk       tools.Risk
+			resultJSON json.RawMessage
+			errText    string
+		)
+		if err != nil {
+			status = store.ToolCallStatusRejected
+			errText = err.Error()
+			content = tools.MarkData(fmt.Sprintf("error: unknown tool %q", call.Name))
+		} else {
+			risk = tool.Risk()
+			if valErr := a.opts.Tools.Validate(call.Name, call.Arguments); valErr != nil {
+				status = store.ToolCallStatusRejected
+				errText = valErr.Error()
+				content = tools.MarkData(fmt.Sprintf("error: invalid arguments: %v", valErr))
+			} else if tool.Risk() == tools.RiskCritical && a.opts.Approvals == nil {
+				status = store.ToolCallStatusRejected
+				errText = "critical tool requires approval gate"
+				content = tools.MarkData(fmt.Sprintf("error: critical tool %q requires approval gate", call.Name))
+			} else if tool.Risk() == tools.RiskCritical {
+				// The risk comes from the tool's definition, never from the arguments.
+				action, proposeErr := a.opts.Approvals.Propose(ctx, user, tool, call.Arguments)
+				if proposeErr != nil {
+					return nil, fmt.Errorf("propose action: %w", proposeErr)
+				}
+				a.showCard(ctx, user, action)
+				status = store.ToolCallStatusProposed
+				content = "pending approval " + action.ID
+				resultJSON, _ = json.Marshal(content)
+			} else {
+				res, execErr := tool.Execute(ctx, call.Arguments)
+				if execErr != nil {
+					status = store.ToolCallStatusError
+					errText = execErr.Error()
+					content = tools.MarkData(fmt.Sprintf("error: %v", execErr))
+				} else {
+					status = store.ToolCallStatusExecuted
+					resBytes, _ := json.Marshal(res.Content)
+					resultJSON = resBytes
+					content = tools.MarkData(res.Content)
+				}
+			}
+		}
+		args := call.Arguments
+		if len(bytes.TrimSpace(args)) == 0 {
+			args = json.RawMessage("{}")
+		}
+		recordErr := a.store.RecordToolCall(ctx, user, store.ToolCall{
+			ConversationID: conversationID,
+			ToolName:       call.Name,
+			ArgsJSON:       args,
+			Risk:           risk,
+			Status:         status,
+			ResultJSON:     resultJSON,
+			Error:          errText,
+			StartedAt:      start,
+			Latency:        time.Since(start),
+		})
+		if recordErr != nil {
+			return nil, fmt.Errorf("record tool call: %w", recordErr)
+		}
+		messages = append(messages, model.Message{
+			Role:       model.RoleTool,
+			ToolCallID: call.ID,
+			Content:    content,
+		})
+	}
+	return messages, nil
+}
+
+// showCard sends the action's card and records the delivery. A failure is logged and does not
+// fail the message: the card is sent again on the user's next message.
+func (a *Agent) showCard(ctx context.Context, user identity.UserID, action store.PendingAction) {
+	if a.opts.Cards == nil {
+		return
+	}
+	if err := a.opts.Cards.SendApprovalCard(ctx, action); err != nil {
+		slog.WarnContext(ctx, "approval card not sent", "action_id", action.ID, "error", err)
+		return
+	}
+	if err := a.store.MarkCardSent(ctx, user, action.ID, time.Now()); err != nil {
+		slog.WarnContext(ctx, "approval card delivery not recorded", "action_id", action.ID, "error", err)
+	}
+}
+
+// resendCards shows again the cards of the user's pending actions that were never delivered.
+func (a *Agent) resendCards(ctx context.Context, user identity.UserID) {
+	if a.opts.Cards == nil {
+		return
+	}
+	unsent, err := a.store.UnsentCards(ctx, user, time.Now())
+	if err != nil {
+		slog.WarnContext(ctx, "unsent approval cards not listed", "error", err)
+		return
+	}
+	for _, action := range unsent {
+		a.showCard(ctx, user, action)
+	}
 }
 
 func (a *Agent) prompt(history []store.Message) []model.Message {

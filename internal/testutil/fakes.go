@@ -123,6 +123,8 @@ type FakeStore struct {
 	conversations []store.Conversation
 	messages      []store.Message
 	modelCalls    []store.ModelCall
+	toolCalls     []store.ToolCall
+	actions       []store.PendingAction
 	identities    map[identityKey]identity.UserID
 }
 
@@ -279,4 +281,188 @@ func (s *FakeStore) ModelCalls(user identity.UserID) []store.ModelCall {
 		}
 	}
 	return found
+}
+
+// RecordToolCall implements store.Store.
+func (s *FakeStore) RecordToolCall(ctx context.Context, user identity.UserID, call store.ToolCall) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.owns(user, call.ConversationID) {
+		return store.ErrConversationNotFound
+	}
+	call.ID = s.id()
+	call.UserID = user
+	s.toolCalls = append(s.toolCalls, call)
+	return nil
+}
+
+// ToolCalls returns the tool calls recorded for user.
+func (s *FakeStore) ToolCalls(user identity.UserID) []store.ToolCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []store.ToolCall
+	for _, c := range s.toolCalls {
+		if c.UserID == user {
+			found = append(found, c)
+		}
+	}
+	return found
+}
+
+// ProposeAction implements store.Store.
+func (s *FakeStore) ProposeAction(ctx context.Context, user identity.UserID, action store.PendingAction) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	action.UserID = user
+	s.actions = append(s.actions, action)
+	return nil
+}
+
+// PendingActions returns the pending actions proposed for user.
+func (s *FakeStore) PendingActions(user identity.UserID) []store.PendingAction {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []store.PendingAction
+	for _, a := range s.actions {
+		if a.UserID == user {
+			found = append(found, a)
+		}
+	}
+	return found
+}
+
+// GetPendingAction implements store.Store.
+func (s *FakeStore) GetPendingAction(ctx context.Context, user identity.UserID, id string) (store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return store.PendingAction{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.actionIndex(user, id)
+	if i < 0 {
+		return store.PendingAction{}, store.ErrActionNotFound
+	}
+	return s.actions[i], nil
+}
+
+// UpdatePendingAction implements store.Store.
+func (s *FakeStore) UpdatePendingAction(ctx context.Context, user identity.UserID, id, from string, update store.PendingUpdate) (bool, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.actionIndex(user, id)
+	if i < 0 || s.actions[i].State != from {
+		return false, nil
+	}
+	a := &s.actions[i]
+	a.State = update.State
+	if update.DecidedAt != nil {
+		a.DecidedAt = update.DecidedAt
+	}
+	if update.ExecutedAt != nil {
+		a.ExecutedAt = update.ExecutedAt
+	}
+	if update.ResultJSON != nil {
+		a.ResultJSON = update.ResultJSON
+	}
+	if update.Error != "" {
+		a.Error = update.Error
+	}
+	return true, nil
+}
+
+// TamperPendingAction replaces a stored action's arguments without touching its hash, as someone
+// editing the database directly would.
+func (s *FakeStore) TamperPendingAction(id string, args json.RawMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.actions {
+		if s.actions[i].ID == id {
+			s.actions[i].ArgsJSON = args
+		}
+	}
+}
+
+// SupersedePending implements store.Store.
+func (s *FakeStore) SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for i := range s.actions {
+		a := &s.actions[i]
+		if a.UserID == user && a.ToolName == tool && a.State == store.PendingProposed && a.ID != keepID {
+			a.State = store.PendingSuperseded
+			a.SupersededBy = keepID
+			n++
+		}
+	}
+	return n, nil
+}
+
+// MarkCardSent implements store.Store.
+func (s *FakeStore) MarkCardSent(ctx context.Context, user identity.UserID, id string, at time.Time) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.actionIndex(user, id)
+	if i < 0 {
+		return store.ErrActionNotFound
+	}
+	s.actions[i].CardSentAt = &at
+	return nil
+}
+
+// UnsentCards implements store.Store.
+func (s *FakeStore) UnsentCards(ctx context.Context, user identity.UserID, now time.Time) ([]store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []store.PendingAction
+	for _, a := range s.actions {
+		if a.UserID == user && a.State == store.PendingProposed && a.CardSentAt == nil && a.ExpiresAt.After(now) {
+			found = append(found, a)
+		}
+	}
+	return found, nil
+}
+
+// actionIndex returns the position of user's action id, or -1. The caller holds s.mu.
+func (s *FakeStore) actionIndex(user identity.UserID, id string) int {
+	for i, a := range s.actions {
+		if a.ID == id && a.UserID == user {
+			return i
+		}
+	}
+	return -1
+}
+
+// FailStaleApprovals implements store.Store.
+func (s *FakeStore) FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for i := range s.actions {
+		a := &s.actions[i]
+		if a.State == store.PendingApproved && a.DecidedAt != nil && a.DecidedAt.Before(cutoff) {
+			a.State = store.PendingFailed
+			a.Error = message
+			n++
+		}
+	}
+	return n, nil
 }

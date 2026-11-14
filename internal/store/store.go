@@ -9,6 +9,7 @@ import (
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
+	"github.com/epierre/nestor/internal/tools"
 )
 
 var (
@@ -63,6 +64,76 @@ type ModelCall struct {
 	ResponseJSON     json.RawMessage
 }
 
+// Values of ToolCall.Status.
+const (
+	ToolCallStatusExecuted = "executed"
+	ToolCallStatusRejected = "rejected"
+	ToolCallStatusError    = "error"
+	ToolCallStatusPending  = "pending"
+	ToolCallStatusProposed = "proposed"
+)
+
+// ToolCall is one row of the tool call log.
+type ToolCall struct {
+	ID             int64
+	UserID         identity.UserID
+	ConversationID int64
+	ModelCallID    *int64
+	ToolName       string
+	ArgsJSON       json.RawMessage
+	Risk           tools.Risk
+	Status         string
+	ResultJSON     json.RawMessage
+	Error          string
+	StartedAt      time.Time
+	Latency        time.Duration
+}
+
+// Values of PendingAction.State. Only the proposed state is written so far; the others are
+// listed so the stored states match the design.
+const (
+	PendingProposed   = "proposed"
+	PendingApproved   = "approved"
+	PendingRejected   = "rejected"
+	PendingExecuted   = "executed"
+	PendingFailed     = "failed"
+	PendingExpired    = "expired"
+	PendingSuperseded = "superseded"
+)
+
+// ErrActionNotFound is returned when a pending action does not exist or belongs to another user.
+// The two are not told apart.
+var ErrActionNotFound = errors.New("pending action not found")
+
+// PendingAction is a critical tool call waiting for its user's approval. ArgsJSON is the exact
+// text that ArgsHash covers.
+type PendingAction struct {
+	ID           string
+	UserID       identity.UserID
+	ToolName     string
+	ArgsJSON     json.RawMessage
+	ArgsHash     string
+	Preview      string
+	State        string
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
+	DecidedAt    *time.Time // nil until the user or the clock decides
+	ExecutedAt   *time.Time // nil until the tool has run, or failed to
+	ResultJSON   json.RawMessage
+	Error        string
+	SupersededBy string     // set when a replacement for this action was proposed
+	CardSentAt   *time.Time // nil until its approval card was delivered
+}
+
+// PendingUpdate sets the fields that a decision changes. A nil time leaves the stored one alone.
+type PendingUpdate struct {
+	State      string
+	DecidedAt  *time.Time
+	ExecutedAt *time.Time
+	ResultJSON json.RawMessage
+	Error      string
+}
+
 // Store persists conversations, messages and model calls. Every method takes the user ID
 // explicitly and must call RequireUser before doing any work.
 type Store interface {
@@ -74,6 +145,25 @@ type Store interface {
 	// RecentMessages returns up to limit of the newest messages, oldest first.
 	RecentMessages(ctx context.Context, user identity.UserID, conversationID int64, limit int) ([]Message, error)
 	RecordModelCall(ctx context.Context, user identity.UserID, call ModelCall) error
+	RecordToolCall(ctx context.Context, user identity.UserID, call ToolCall) error
+	// ProposeAction stores a new pending action owned by user.
+	ProposeAction(ctx context.Context, user identity.UserID, action PendingAction) error
+	// GetPendingAction returns one of the user's pending actions, or ErrActionNotFound.
+	GetPendingAction(ctx context.Context, user identity.UserID, id string) (PendingAction, error)
+	// UpdatePendingAction applies update only while the user's action is in state from. It
+	// reports false when it is in another state, which is how a repeated decision loses the race.
+	UpdatePendingAction(ctx context.Context, user identity.UserID, id, from string, update PendingUpdate) (bool, error)
+	// FailStaleApprovals marks every action approved before cutoff as failed with message, for
+	// all users, and returns how many it changed. It is the one method without a user ID: it reads
+	// no user data and changes only approved rows past cutoff.
+	FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error)
+	// SupersedePending marks the user's other proposed actions for tool as superseded by keepID,
+	// and returns how many it changed.
+	SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error)
+	// MarkCardSent records that the action's card was delivered.
+	MarkCardSent(ctx context.Context, user identity.UserID, id string, at time.Time) error
+	// UnsentCards returns the user's proposed, unexpired actions whose cards were not delivered.
+	UnsentCards(ctx context.Context, user identity.UserID, now time.Time) ([]PendingAction, error)
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's

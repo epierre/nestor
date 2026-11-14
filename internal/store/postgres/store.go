@@ -2,8 +2,10 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -245,6 +247,186 @@ func (s *Store) RecordModelCall(ctx context.Context, user identity.UserID, call 
 		return fmt.Errorf("record model call: %w", conversationError(err))
 	}
 	return nil
+}
+
+// RecordToolCall implements store.Store. Latency is stored in milliseconds, rounded up from
+// below one so that a call that took time never reads as zero.
+func (s *Store) RecordToolCall(ctx context.Context, user identity.UserID, call store.ToolCall) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	latency := call.Latency.Milliseconds()
+	if latency == 0 && call.Latency > 0 {
+		latency = 1
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO tool_calls (user_id, conversation_id, model_call_id, tool_name, args_json,
+			risk, status, result_json, error, started_at, latency_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		user, call.ConversationID, call.ModelCallID, call.ToolName, call.ArgsJSON,
+		call.Risk, call.Status, call.ResultJSON, call.Error, call.StartedAt, latency)
+	if err != nil {
+		return fmt.Errorf("record tool call: %w", conversationError(err))
+	}
+	return nil
+}
+
+// ProposeAction implements store.Store.
+func (s *Store) ProposeAction(ctx context.Context, user identity.UserID, action store.PendingAction) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO pending_actions (id, user_id, tool_name, args_json, args_hash, preview,
+			state, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		action.ID, user, action.ToolName, action.ArgsJSON, action.ArgsHash, action.Preview,
+		action.State, action.CreatedAt, action.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("propose action: %w", err)
+	}
+	return nil
+}
+
+// pendingColumns lists the columns that scanPending reads, in its order.
+const pendingColumns = `id, user_id, tool_name, args_json::text, args_hash, preview, state, created_at,
+	expires_at, decided_at, executed_at, result_json::text, error, superseded_by, card_sent_at`
+
+// scanPending reads one row of pendingColumns.
+func scanPending(row pgx.Row) (store.PendingAction, error) {
+	var (
+		action     store.PendingAction
+		argsJSON   string
+		resultJSON *string
+		supersede  *string
+	)
+	err := row.Scan(&action.ID, &action.UserID, &action.ToolName, &argsJSON, &action.ArgsHash,
+		&action.Preview, &action.State, &action.CreatedAt, &action.ExpiresAt, &action.DecidedAt,
+		&action.ExecutedAt, &resultJSON, &action.Error, &supersede, &action.CardSentAt)
+	if err != nil {
+		return store.PendingAction{}, err
+	}
+	action.ArgsJSON = json.RawMessage(argsJSON)
+	if resultJSON != nil {
+		action.ResultJSON = json.RawMessage(*resultJSON)
+	}
+	if supersede != nil {
+		action.SupersededBy = *supersede
+	}
+	return action, nil
+}
+
+// GetPendingAction implements store.Store.
+func (s *Store) GetPendingAction(ctx context.Context, user identity.UserID, id string) (store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return store.PendingAction{}, err
+	}
+	action, err := scanPending(s.pool.QueryRow(ctx, `
+		SELECT `+pendingColumns+`
+		FROM pending_actions
+		WHERE id = $1 AND user_id = $2`, id, user))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.PendingAction{}, store.ErrActionNotFound
+	}
+	if err != nil {
+		return store.PendingAction{}, fmt.Errorf("get pending action: %w", err)
+	}
+	return action, nil
+}
+
+// SupersedePending implements store.Store.
+func (s *Store) SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return 0, err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions
+		SET state = 'superseded', superseded_by = $3
+		WHERE user_id = $1 AND tool_name = $2 AND state = 'proposed' AND id <> $3`,
+		user, tool, keepID)
+	if err != nil {
+		return 0, fmt.Errorf("supersede pending actions: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// MarkCardSent implements store.Store.
+func (s *Store) MarkCardSent(ctx context.Context, user identity.UserID, id string, at time.Time) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions SET card_sent_at = $3
+		WHERE id = $1 AND user_id = $2`, id, user, at)
+	if err != nil {
+		return fmt.Errorf("mark card sent: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return store.ErrActionNotFound
+	}
+	return nil
+}
+
+// UnsentCards implements store.Store.
+func (s *Store) UnsentCards(ctx context.Context, user identity.UserID, now time.Time) ([]store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+pendingColumns+`
+		FROM pending_actions
+		WHERE user_id = $1 AND state = 'proposed' AND card_sent_at IS NULL AND expires_at > $2
+		ORDER BY created_at`, user, now)
+	if err != nil {
+		return nil, fmt.Errorf("list unsent cards: %w", err)
+	}
+	defer rows.Close()
+	var found []store.PendingAction
+	for rows.Next() {
+		action, err := scanPending(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan unsent card: %w", err)
+		}
+		found = append(found, action)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list unsent cards: %w", err)
+	}
+	return found, nil
+}
+
+// UpdatePendingAction implements store.Store. The state check and the change are one statement,
+// so two decisions cannot both move the same action.
+func (s *Store) UpdatePendingAction(ctx context.Context, user identity.UserID, id, from string, update store.PendingUpdate) (bool, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return false, err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions
+		SET state = $4,
+			decided_at = COALESCE($5::timestamptz, decided_at),
+			executed_at = COALESCE($6::timestamptz, executed_at),
+			result_json = COALESCE($7::json, result_json),
+			error = CASE WHEN $8::text = '' THEN error ELSE $8::text END
+		WHERE id = $1 AND user_id = $2 AND state = $3`,
+		id, user, from, update.State, update.DecidedAt, update.ExecutedAt, update.ResultJSON, update.Error)
+	if err != nil {
+		return false, fmt.Errorf("update pending action: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// FailStaleApprovals implements store.Store. It is deliberately unscoped: see the interface.
+func (s *Store) FailStaleApprovals(ctx context.Context, cutoff time.Time, message string) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions
+		SET state = 'failed', error = $2
+		WHERE state = 'approved' AND decided_at < $1`,
+		cutoff, message)
+	if err != nil {
+		return 0, fmt.Errorf("fail stale approvals: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // conversationError turns the composite foreign key's refusal into ErrConversationNotFound.

@@ -5,19 +5,27 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/epierre/nestor/internal/approval"
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
+	"github.com/epierre/nestor/internal/tools"
 )
 
 var _ channel.Handler = (*Agent)(nil)
@@ -610,5 +618,631 @@ func TestNewOnlyMatchesTheWholeCommand(t *testing.T) {
 
 	if got := send(t, newAgent(client), 1, "/newsletter"); got != "reply 1" {
 		t.Errorf("got reply %q, want the model's", got)
+	}
+}
+
+func TestToolDispatch(t *testing.T) {
+	t.Run("read tool executes and result returned", func(t *testing.T) {
+		call := model.ToolCall{ID: "call_time", Name: "current_time", Arguments: json.RawMessage(`{}`)}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "The time is 12:00."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewCurrentTimeToolWithClock(func() time.Time {
+			return time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+		}))
+
+		opts := testOptions()
+		opts.Tools = reg
+		a := New(client, testutil.NewFakeStore(), opts)
+
+		reply := send(t, a, 1, "what time is it?")
+		if reply != "The time is 12:00." {
+			t.Errorf("got reply %q, want 'The time is 12:00.'", reply)
+		}
+
+		req := lastRequest(t, client)
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if lastMsg.Role != model.RoleTool {
+			t.Fatalf("last message role: got %q, want %q", lastMsg.Role, model.RoleTool)
+		}
+		if lastMsg.ToolCallID != "call_time" {
+			t.Errorf("tool call id: got %q, want 'call_time'", lastMsg.ToolCallID)
+		}
+		if !strings.Contains(lastMsg.Content, "2026-11-14") {
+			t.Errorf("tool message content does not contain date: %q", lastMsg.Content)
+		}
+		if !strings.HasPrefix(lastMsg.Content, "[data]") {
+			t.Errorf("tool message content not marked as data: %q", lastMsg.Content)
+		}
+	})
+
+	t.Run("unknown tool yields error result", func(t *testing.T) {
+		call := model.ToolCall{ID: "call_unknown", Name: "delete_all_email", Arguments: json.RawMessage(`{}`)}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "I cannot do that."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		reg := tools.NewRegistry()
+		opts := testOptions()
+		opts.Tools = reg
+		a := New(client, testutil.NewFakeStore(), opts)
+
+		reply := send(t, a, 1, "delete email")
+		if reply != "I cannot do that." {
+			t.Errorf("got reply %q, want 'I cannot do that.'", reply)
+		}
+
+		req := lastRequest(t, client)
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if lastMsg.Role != model.RoleTool {
+			t.Fatalf("last message role: got %q, want %q", lastMsg.Role, model.RoleTool)
+		}
+		if lastMsg.ToolCallID != "call_unknown" {
+			t.Errorf("tool call id: got %q, want 'call_unknown'", lastMsg.ToolCallID)
+		}
+		if !strings.Contains(lastMsg.Content, "unknown tool") {
+			t.Errorf("tool message content does not mention unknown tool: %q", lastMsg.Content)
+		}
+		if !strings.HasPrefix(lastMsg.Content, "[data]") {
+			t.Errorf("tool message content not marked as data: %q", lastMsg.Content)
+		}
+	})
+	t.Run("tool receives requesting user in context", func(t *testing.T) {
+		var userInContext identity.UserID
+		tool := &testUserTool{
+			onExec: func(ctx context.Context) {
+				u, _ := identity.UserFrom(ctx)
+				userInContext = u
+			},
+		}
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tool)
+
+		call := model.ToolCall{ID: "call_inspect", Name: "inspect_user", Arguments: json.RawMessage(`{}`)}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Done."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		opts := testOptions()
+		opts.Tools = reg
+		st := testutil.NewFakeStore()
+		a := New(client, st, opts)
+
+		reply := send(t, a, 42, "inspect my user")
+		if reply != "Done." {
+			t.Errorf("got reply %q, want 'Done.'", reply)
+		}
+		if userInContext != 42 {
+			t.Errorf("expected tool to receive user 42 in context, got %v", userInContext)
+		}
+
+		recorded := st.ToolCalls(42)
+		if len(recorded) != 1 {
+			t.Fatalf("expected 1 recorded tool call for user 42, got %d", len(recorded))
+		}
+		if recorded[0].Status != store.ToolCallStatusExecuted {
+			t.Errorf("got recorded status %q, want %q", recorded[0].Status, store.ToolCallStatusExecuted)
+		}
+	})
+
+	t.Run("user_id argument rejected by schema", func(t *testing.T) {
+		call := model.ToolCall{
+			ID:        "call_exploit",
+			Name:      "current_time",
+			Arguments: json.RawMessage(`{"user_id": 999}`),
+		}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Refused."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewCurrentTimeTool())
+
+		opts := testOptions()
+		opts.Tools = reg
+		st := testutil.NewFakeStore()
+		a := New(client, st, opts)
+
+		reply := send(t, a, 1, "check time for 999")
+		if reply != "Refused." {
+			t.Errorf("got reply %q, want 'Refused.'", reply)
+		}
+
+		req := lastRequest(t, client)
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if !strings.Contains(lastMsg.Content, "invalid arguments") {
+			t.Errorf("expected validation error in tool message, got %q", lastMsg.Content)
+		}
+
+		// Tool call was recorded with status rejected for user 1, none for user 999
+		calls1 := st.ToolCalls(1)
+		if len(calls1) != 1 || calls1[0].Status != store.ToolCallStatusRejected {
+			t.Errorf("expected 1 rejected call for user 1, got %+v", calls1)
+		}
+		calls999 := st.ToolCalls(999)
+		if len(calls999) != 0 {
+			t.Errorf("expected 0 calls for user 999, got %d", len(calls999))
+		}
+	})
+
+	t.Run("critical tool never executed by agent", func(t *testing.T) {
+		var executed bool
+		sender := func(ctx context.Context, uid identity.UserID, text string) error {
+			executed = true
+			return nil
+		}
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewNotifySelfTool(sender))
+
+		call := model.ToolCall{
+			ID:        "call_crit",
+			Name:      "notify_self",
+			Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+		}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Waiting."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		opts := testOptions()
+		opts.Tools = reg
+		st := testutil.NewFakeStore()
+		a := New(client, st, opts)
+
+		reply := send(t, a, 1, "notify me")
+		if reply != "Waiting." {
+			t.Errorf("got reply %q, want 'Waiting.'", reply)
+		}
+
+		// Tool was never executed
+		if executed {
+			t.Error("critical tool must never be executed by agent")
+		}
+
+		// Tool obtained from agent's registry view refuses direct execution
+		tool, err := a.opts.Tools.Lookup("notify_self")
+		if err != nil {
+			t.Fatalf("Lookup notify_self: %v", err)
+		}
+		_, execErr := tool.Execute(identity.WithUser(context.Background(), 1), json.RawMessage(`{"text": "Dentist at 3pm"}`))
+		if !errors.Is(execErr, tools.ErrCriticalRefusal) {
+			t.Errorf("expected ErrCriticalRefusal from agent view, got: %v", execErr)
+		}
+	})
+
+	t.Run("critical call becomes pending", func(t *testing.T) {
+		var executed bool
+		sender := func(ctx context.Context, uid identity.UserID, text string) error {
+			executed = true
+			return nil
+		}
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewNotifySelfTool(sender))
+
+		call := model.ToolCall{
+			ID:        "call_crit",
+			Name:      "notify_self",
+			Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+		}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Waiting for your approval."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		st := testutil.NewFakeStore()
+		opts := testOptions()
+		opts.Tools = reg
+		opts.Approvals = approval.New(st, reg, time.Hour)
+		a := New(client, st, opts)
+
+		reply := send(t, a, 1, "notify me")
+		if reply != "Waiting for your approval." {
+			t.Errorf("got reply %q, want the model's words", reply)
+		}
+		if executed {
+			t.Error("critical tool executed without approval")
+		}
+
+		pending := st.PendingActions(1)
+		if len(pending) != 1 {
+			t.Fatalf("got %d pending actions for user 1, want 1", len(pending))
+		}
+		if got, want := toolResult(t, client, "call_crit"), "pending approval "+pending[0].ID; got != want {
+			t.Errorf("model saw %q, want %q", got, want)
+		}
+
+		calls := st.ToolCalls(1)
+		if len(calls) != 1 {
+			t.Fatalf("got %d tool calls logged, want 1", len(calls))
+		}
+		if calls[0].Status != store.ToolCallStatusProposed || calls[0].Risk != tools.RiskCritical {
+			t.Errorf("logged status %q risk %q, want proposed and critical", calls[0].Status, calls[0].Risk)
+		}
+	})
+
+	t.Run("risk claim in args ignored", func(t *testing.T) {
+		var executed bool
+		reg := tools.NewRegistry()
+		_ = reg.Register(&openCriticalTool{executed: &executed})
+
+		// The schema accepts extra properties, so the claim reaches the dispatcher.
+		call := model.ToolCall{
+			ID:        "call_claim",
+			Name:      "open_critical",
+			Arguments: json.RawMessage(`{"text": "Dentist at 3pm", "risk": "read"}`),
+		}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "Waiting."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		st := testutil.NewFakeStore()
+		opts := testOptions()
+		opts.Tools = reg
+		opts.Approvals = approval.New(st, reg, time.Hour)
+		a := New(client, st, opts)
+
+		send(t, a, 1, "do it")
+		if executed {
+			t.Fatal("critical tool executed on the strength of a risk claim")
+		}
+		if n := len(st.PendingActions(1)); n != 1 {
+			t.Fatalf("got %d pending actions, want 1", n)
+		}
+		calls := st.ToolCalls(1)
+		if len(calls) != 1 || calls[0].Risk != tools.RiskCritical || calls[0].Status != store.ToolCallStatusProposed {
+			t.Errorf("logged calls %+v, want one proposed critical call", calls)
+		}
+	})
+}
+
+// recordingCards records the cards it is asked to show. Its first failures calls fail, and err is
+// the error they return.
+type recordingCards struct {
+	shown    []store.PendingAction
+	failures int
+	err      error
+}
+
+func (r *recordingCards) SendApprovalCard(ctx context.Context, action store.PendingAction) error {
+	r.shown = append(r.shown, action)
+	if r.failures > 0 {
+		r.failures--
+		return r.err
+	}
+	return nil
+}
+
+// criticalTurns scripts one critical call to notify_self followed by a plain reply.
+func criticalTurns() *testutil.FakeModel {
+	turns := []model.CompletionResponse{
+		{ToolCalls: []model.ToolCall{{
+			ID:        "call_card",
+			Name:      "notify_self",
+			Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+		}}},
+		{Content: "Waiting."},
+	}
+	return &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		return turns[(len(req.Messages)-2)/2], nil
+	}}
+}
+
+func TestRejectionVisibleToModelOnNextTurn(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	gate := approval.New(st, reg, time.Hour)
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = gate
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		last := req.Messages[len(req.Messages)-1]
+		switch {
+		case last.Role == model.RoleUser && last.Content == "notify me":
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{{
+				ID: "call_reject", Name: "notify_self", Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+			}}}, nil
+		case last.Role == model.RoleUser:
+			return model.CompletionResponse{Content: "Noted."}, nil
+		}
+		return model.CompletionResponse{Content: "Waiting."}, nil
+	}}
+	a := New(client, st, opts)
+	send(t, a, 1, "notify me")
+	pending := st.PendingActions(1)
+	if len(pending) != 1 {
+		t.Fatalf("got %d pending actions, want 1", len(pending))
+	}
+	if _, err := gate.Decide(identity.WithUser(context.Background(), 1), 1, pending[0].ID, approval.Reject); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	send(t, a, 1, "what happened?")
+
+	var found bool
+	for _, m := range lastRequest(t, client).Messages {
+		if m.Role == model.RoleSystem && strings.Contains(m.Content, pending[0].ID) && strings.Contains(m.Content, "was rejected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the next model request does not say the action was rejected")
+	}
+}
+
+func TestCardShownAfterProposal(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	cards := &recordingCards{}
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = cards
+	a := New(criticalTurns(), st, opts)
+
+	send(t, a, 1, "notify me")
+
+	pending := st.PendingActions(1)
+	if len(cards.shown) != 1 || len(pending) != 1 {
+		t.Fatalf("cards %d, pending %d, want one of each", len(cards.shown), len(pending))
+	}
+	if cards.shown[0].ID != pending[0].ID {
+		t.Errorf("card shows action %s, want the proposed %s", cards.shown[0].ID, pending[0].ID)
+	}
+}
+
+func TestFailedCardLeavesActionPending(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	client := criticalTurns()
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = &recordingCards{failures: 1, err: errors.New("telegram down")}
+	a := New(client, st, opts)
+
+	if reply := send(t, a, 1, "notify me"); reply != "Waiting." {
+		t.Errorf("reply %q, want the model's words despite the failed card", reply)
+	}
+	pending := st.PendingActions(1)
+	if len(pending) != 1 || pending[0].State != store.PendingProposed {
+		t.Fatalf("pending %+v, want one proposed action", pending)
+	}
+	if got, want := toolResult(t, client, "call_card"), "pending approval "+pending[0].ID; got != want {
+		t.Errorf("model saw %q, want %q", got, want)
+	}
+}
+
+// toolResult returns the content of the tool message that answers callID in the last request.
+func toolResult(t *testing.T, client *testutil.FakeModel, callID string) string {
+	t.Helper()
+	for _, m := range lastRequest(t, client).Messages {
+		if m.Role == model.RoleTool && m.ToolCallID == callID {
+			return m.Content
+		}
+	}
+	t.Fatalf("no tool result for call %s in the last request", callID)
+	return ""
+}
+
+// openCriticalTool is critical and accepts any arguments.
+type openCriticalTool struct {
+	executed *bool
+}
+
+func (t *openCriticalTool) Name() string        { return "open_critical" }
+func (t *openCriticalTool) Description() string { return "Does something critical." }
+func (t *openCriticalTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type": "object"}`)
+}
+func (t *openCriticalTool) Risk() tools.Risk { return tools.RiskCritical }
+func (t *openCriticalTool) Preview(args json.RawMessage) (string, error) {
+	return "Do something critical", nil
+}
+func (t *openCriticalTool) Execute(ctx context.Context, args json.RawMessage) (tools.Result, error) {
+	*t.executed = true
+	return tools.Result{Content: "done"}, nil
+}
+
+type testUserTool struct {
+	onExec func(ctx context.Context)
+}
+
+func (t *testUserTool) Name() string                                 { return "inspect_user" }
+func (t *testUserTool) Description() string                          { return "inspects user" }
+func (t *testUserTool) Schema() json.RawMessage                      { return json.RawMessage(`{"type":"object"}`) }
+func (t *testUserTool) Risk() tools.Risk                             { return tools.RiskRead }
+func (t *testUserTool) Preview(args json.RawMessage) (string, error) { return "", nil }
+func (t *testUserTool) Execute(ctx context.Context, args json.RawMessage) (tools.Result, error) {
+	if t.onExec != nil {
+		t.onExec(ctx)
+	}
+	return tools.Result{Content: "ok"}, nil
+}
+
+func TestStructuralCriticalToolExecution(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find repo root")
+		}
+		dir = parent
+	}
+
+	fset := token.NewFileSet()
+	var callSites []string
+
+	err = filepath.Walk(filepath.Join(dir, "internal"), func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, path)
+		if strings.HasPrefix(rel, "internal/approval") || strings.HasPrefix(rel, "internal/tools") || strings.HasPrefix(rel, "internal/testutil") {
+			return nil
+		}
+
+		node, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+
+		ast.Inspect(node, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Execute" {
+				return true
+			}
+			pos := fset.Position(call.Pos())
+			callSites = append(callSites, rel+":"+strconv.Itoa(pos.Line))
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ast walk: %v", err)
+	}
+
+	// Verify that the only call site outside approval is in agent.go
+	for _, site := range callSites {
+		if !strings.HasPrefix(site, "internal/agent/agent.go:") {
+			t.Errorf("forbidden Execute call site outside internal/approval: %s", site)
+		}
+	}
+}
+
+func TestEditSupersedesAndRequiresNewApproval(t *testing.T) {
+	reg := tools.NewRegistry()
+	sends := 0
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { sends++; return nil }))
+	st := testutil.NewFakeStore()
+	cards := &recordingCards{}
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = cards
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		last := req.Messages[len(req.Messages)-1]
+		call := func(text string) model.CompletionResponse {
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{{
+				ID: "call_" + text, Name: "notify_self", Arguments: json.RawMessage(`{"text": "` + text + `"}`),
+			}}}
+		}
+		switch {
+		case last.Role == model.RoleUser && last.Content == "notify me":
+			return call("Dentist at 3pm"), nil
+		case last.Role == model.RoleUser && last.Content == "make it 4pm":
+			// The first proposal is still in history, so the model can refer to it.
+			return call("Dentist at 4pm"), nil
+		}
+		return model.CompletionResponse{Content: "Updated, please approve."}, nil
+	}}
+	a := New(client, st, opts)
+
+	send(t, a, 1, "notify me")
+	send(t, a, 1, "make it 4pm")
+
+	pending := st.PendingActions(1)
+	if len(pending) != 2 {
+		t.Fatalf("got %d actions, want the original and its replacement", len(pending))
+	}
+	original, replacement := pending[0], pending[1]
+	if original.State != store.PendingSuperseded || original.SupersededBy != replacement.ID {
+		t.Errorf("original state %q superseded_by %q, want superseded by %s", original.State, original.SupersededBy, replacement.ID)
+	}
+	if replacement.State != store.PendingProposed || replacement.Preview != "Notify yourself: Dentist at 4pm" {
+		t.Errorf("replacement %+v, want a proposed 4pm action", replacement)
+	}
+	if sends != 0 {
+		t.Errorf("tool ran %d times, want 0", sends)
+	}
+	if len(cards.shown) != 2 || cards.shown[1].ID != replacement.ID {
+		t.Errorf("cards shown %+v, want a card for the replacement", cards.shown)
+	}
+}
+
+func TestPendingCardsResentOnNextMessage(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	cards := &recordingCards{failures: 1, err: errors.New("telegram down")}
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = cards
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		last := req.Messages[len(req.Messages)-1]
+		switch {
+		case last.Role == model.RoleUser && last.Content == "notify me":
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{{
+				ID: "call_resend", Name: "notify_self", Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`),
+			}}}, nil
+		case last.Role == model.RoleUser:
+			return model.CompletionResponse{Content: "ok"}, nil
+		}
+		return model.CompletionResponse{Content: "Waiting."}, nil
+	}}
+	a := New(client, st, opts)
+
+	send(t, a, 1, "notify me")
+	if pending := st.PendingActions(1); len(pending) != 1 || pending[0].CardSentAt != nil {
+		t.Fatalf("after failed send: %+v, want one action with no card sent", pending)
+	}
+
+	send(t, a, 1, "hello")
+	if len(cards.shown) != 2 || cards.shown[1].ID != cards.shown[0].ID {
+		t.Fatalf("cards shown %+v, want the same action shown again on the next message", cards.shown)
+	}
+
+	send(t, a, 1, "hello again")
+	if len(cards.shown) != 2 {
+		t.Errorf("card re-sent after delivery: %d shown, want 2", len(cards.shown))
+	}
+	if pending := st.PendingActions(1); pending[0].CardSentAt == nil {
+		t.Error("card delivered but not marked as sent")
 	}
 }

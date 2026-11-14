@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -43,12 +44,14 @@ func TestLoadValid(t *testing.T) {
 			{ID: 123, DisplayName: "Owner"},
 			{ID: 456, DisplayName: "Ana: the second"},
 		},
-		DatabaseURL:       env["DATABASE_URL"],
-		LLMBaseURL:        "http://litellm:4000/v1",
-		LLMAPIKey:         testAPIKey,
-		LLMModel:          "strong",
-		HistoryLimit:      12,
-		MaxLoopIterations: 3,
+		DatabaseURL:        env["DATABASE_URL"],
+		LLMBaseURL:         "http://litellm:4000/v1",
+		LLMAPIKey:          testAPIKey,
+		LLMModel:           "strong",
+		HistoryLimit:       12,
+		MaxLoopIterations:  3,
+		ApprovalTTL:        24 * time.Hour,
+		ApprovalStaleAfter: 5 * time.Minute,
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v, want %+v", cfg, want)
@@ -151,6 +154,7 @@ func TestLoadInvalidValues(t *testing.T) {
 		{"LLM_BASE_URL", "ftp://litellm/v1"},
 		{"LLM_BASE_URL", "http://"},
 		{"LLM_BASE_URL", "http://bad host/"},
+		{"ENABLE_DEMO_TOOLS", "not-a-bool"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name+"="+tt.value, func(t *testing.T) {
@@ -201,6 +205,77 @@ func TestLoadErrorsContainNoValues(t *testing.T) {
 				if strings.Contains(err.Error(), secret) {
 					t.Errorf("error %q contains %q", err, secret)
 				}
+			}
+		})
+	}
+}
+
+func TestLoadApprovalStaleAfter(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"default", "", 5 * time.Minute, false},
+		{"custom", "2m30s", 2*time.Minute + 30*time.Second, false},
+		{"not a duration", "soon", 0, true},
+		{"zero", "0s", 0, true},
+		{"negative", "-1m", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			if tt.value != "" {
+				env["APPROVAL_STALE_AFTER"] = tt.value
+			}
+			cfg, err := load(env)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "APPROVAL_STALE_AFTER") {
+					t.Fatalf("err = %v, want one naming APPROVAL_STALE_AFTER", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.ApprovalStaleAfter != tt.want {
+				t.Errorf("ApprovalStaleAfter = %v, want %v", cfg.ApprovalStaleAfter, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadApprovalTTL(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"default", "", 24 * time.Hour, false},
+		{"custom", "2h", 2 * time.Hour, false},
+		{"not a duration", "tomorrow", 0, true},
+		{"zero", "0", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			if tt.value != "" {
+				env["APPROVAL_TTL"] = tt.value
+			}
+			cfg, err := load(env)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "APPROVAL_TTL") {
+					t.Fatalf("err = %v, want one naming APPROVAL_TTL", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.ApprovalTTL != tt.want {
+				t.Errorf("ApprovalTTL = %v, want %v", cfg.ApprovalTTL, tt.want)
 			}
 		})
 	}

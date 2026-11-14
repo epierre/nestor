@@ -19,6 +19,7 @@ import (
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store"
+	"github.com/epierre/nestor/internal/tools"
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 )
 
 var appTables = []string{
-	"conversations", "messages", "model_calls", "schema_migrations", "user_identities", "users",
+	"conversations", "messages", "model_calls", "pending_actions", "schema_migrations", "tool_calls", "user_identities", "users",
 }
 
 func tables(t *testing.T, pool *pgxpool.Pool) []string {
@@ -152,7 +153,7 @@ func TestFailedMigrationLeavesNothingApplied(t *testing.T) {
 func TestUserDataTablesRequireUserID(t *testing.T) {
 	pool := migrated(t)
 
-	for _, table := range []string{"user_identities", "conversations", "messages", "model_calls"} {
+	for _, table := range []string{"user_identities", "conversations", "messages", "model_calls", "pending_actions"} {
 		t.Run(table, func(t *testing.T) {
 			var nullable string
 			err := pool.QueryRow(context.Background(), `
@@ -845,6 +846,69 @@ func TestResolveIdentityRefusesDisabled(t *testing.T) {
 
 		if _, err := st.ResolveIdentity(ctx, "telegram", "100"); !errors.Is(err, store.ErrIdentityNotFound) {
 			t.Errorf("got error %v, want ErrIdentityNotFound", err)
+		}
+	})
+}
+
+func TestRecordToolCall(t *testing.T) {
+	st, pool, a, _, ctxA, _ := twoScoped(t)
+	conversation := active(t, st, ctxA, a)
+	started := time.Now().UTC().Truncate(time.Microsecond)
+
+	t.Run("tool call recorded with user", func(t *testing.T) {
+		err := st.RecordToolCall(ctxA, a, store.ToolCall{
+			ConversationID: conversation.ID,
+			ToolName:       "current_time",
+			ArgsJSON:       json.RawMessage(`{}`),
+			Risk:           tools.RiskRead,
+			Status:         store.ToolCallStatusExecuted,
+			ResultJSON:     json.RawMessage(`"12:00"`),
+			StartedAt:      started,
+			Latency:        42 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("RecordToolCall: %v", err)
+		}
+
+		var got struct {
+			userID         int64
+			conversationID int64
+			toolName       string
+			argsJSON       string
+			risk           string
+			status         string
+			resultJSON     *string
+			errorText      string
+			latencyMS      int64
+		}
+		err = pool.QueryRow(context.Background(), `
+			SELECT user_id, conversation_id, tool_name, args_json::text, risk, status, result_json::text, error, latency_ms
+			FROM tool_calls
+			WHERE user_id = $1 AND tool_name = 'current_time'`,
+			a).Scan(&got.userID, &got.conversationID, &got.toolName, &got.argsJSON, &got.risk, &got.status, &got.resultJSON, &got.errorText, &got.latencyMS)
+		if err != nil {
+			t.Fatalf("query tool call: %v", err)
+		}
+		if got.userID != int64(a) {
+			t.Errorf("user_id: got %d, want %d", got.userID, a)
+		}
+		if got.conversationID != conversation.ID {
+			t.Errorf("conversation_id: got %d, want %d", got.conversationID, conversation.ID)
+		}
+		if got.toolName != "current_time" {
+			t.Errorf("tool_name: got %q, want 'current_time'", got.toolName)
+		}
+		if got.risk != string(tools.RiskRead) {
+			t.Errorf("risk: got %q, want %q", got.risk, tools.RiskRead)
+		}
+		if got.status != store.ToolCallStatusExecuted {
+			t.Errorf("status: got %q, want %q", got.status, store.ToolCallStatusExecuted)
+		}
+		if got.resultJSON == nil || *got.resultJSON != `"12:00"` {
+			t.Errorf("result_json: got %v, want '\"12:00\"'", got.resultJSON)
+		}
+		if got.latencyMS != 42 {
+			t.Errorf("latency_ms: got %d, want 42", got.latencyMS)
 		}
 	})
 }

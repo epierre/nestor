@@ -104,3 +104,18 @@ The project SHALL maintain an eval scenario set covering prompt-injection and cr
 #### Scenario: Cross-user approval attempt
 - **WHEN** the eval has user B tap Approve on user A's pending action
 - **THEN** the eval asserts the action is still proposed and nothing executed
+
+### Requirement: Stale approvals are failed, never retried
+The system SHALL move an action still in state approved, whose approval is older than the configured stale-approval threshold, to state failed with an outcome-unknown error, at startup and periodically. The system MUST NOT execute such an action again. This sweep is the only operation that spans users: it reads no user data, returns no action contents, and changes only the state of approved actions past the threshold.
+
+#### Scenario: Crash after claim
+- **WHEN** an action has been claimed as approved, the process stops before its outcome is recorded, and the sweep runs after the threshold has passed
+- **THEN** the action's state becomes failed with an error stating the outcome is unknown, the tool is not executed, and the owner's next conversation shows the action as failed
+
+#### Scenario: Recorded outcome lost after execution
+- **WHEN** the tool ran but recording executed failed, leaving the action approved, and the sweep runs after the threshold has passed
+- **THEN** the action's state becomes failed with an error stating the outcome is unknown, and the tool is not executed again
+
+#### Scenario: Fresh approval left alone
+- **WHEN** an action has been approved less than the threshold ago and the sweep runs
+- **THEN** the action's state is unchanged and nothing is executed
