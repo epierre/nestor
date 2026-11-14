@@ -32,6 +32,7 @@ type Config struct {
 	LLMModel             string
 	HistoryLimit         int
 	MaxLoopIterations    int
+	EnableDemoTools      bool
 }
 
 // Load reads the configuration through getenv and reports every invalid or missing variable at
@@ -57,6 +58,18 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		return n
 	}
+	boolean := func(name string, fallback bool) bool {
+		value := get(name)
+		if value == "" {
+			return fallback
+		}
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s must be a boolean", name))
+			return fallback
+		}
+		return b
+	}
 
 	cfg := Config{
 		TelegramBotToken:  required("TELEGRAM_BOT_TOKEN"),
@@ -66,6 +79,7 @@ func Load(getenv func(string) string) (Config, error) {
 		LLMModel:          get("LLM_MODEL"),
 		HistoryLimit:      positiveInt("HISTORY_LIMIT", defaultHistoryLimit),
 		MaxLoopIterations: positiveInt("MAX_LOOP_ITERATIONS", defaultMaxLoopIterations),
+		EnableDemoTools:   boolean("ENABLE_DEMO_TOOLS", false),
 	}
 	if cfg.LLMModel == "" {
 		cfg.LLMModel = defaultLLMModel

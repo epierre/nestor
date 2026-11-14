@@ -151,6 +151,7 @@ func TestLoadInvalidValues(t *testing.T) {
 		{"LLM_BASE_URL", "ftp://litellm/v1"},
 		{"LLM_BASE_URL", "http://"},
 		{"LLM_BASE_URL", "http://bad host/"},
+		{"ENABLE_DEMO_TOOLS", "not-a-bool"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name+"="+tt.value, func(t *testing.T) {
