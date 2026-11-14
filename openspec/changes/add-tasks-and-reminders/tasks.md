@@ -1,8 +1,8 @@
 ## 1. Storage
 
-- [ ] 1.1 Migration `0006_tasks_reminders`: `tasks` and `reminders` tables with `user_id` and indexes. Test: existing `TestMigrateUpAndDown` plus integration `TestUserDataTablesRequireUserID` extended to the new tables.
-- [ ] 1.2 Store methods for tasks: add with optional due day, list open or all ordered by due day, complete, delete; every method scoped by user. Test: integration `tasks_store_test.go` "tasks scoped to user", "complete and delete only own task".
-- [ ] 1.3 Store methods for reminders: add with chat, list pending, cancel, mark delivered, list users with due reminders, list a user's due reminders. Test: integration `reminders_store_test.go` "due reminders listed per user", "cancelled reminder never delivered", "delivered once marked".
+- [x] 1.1 Migration `0006_tasks_reminders`: `tasks` and `reminders` tables with `user_id` and indexes. Test: existing `TestMigrateUpAndDown` plus integration `TestUserDataTablesRequireUserID` extended to the new tables.
+- [x] 1.2 Store methods for tasks: add with optional due day, list open or all ordered by due day, complete, delete; every method scoped by user. Test: integration `tasks_store_test.go` "tasks scoped to user", "complete and delete only own task".
+- [x] 1.3 Store methods for reminders: add with chat, list pending, cancel, mark delivered, list users with due reminders, list a user's due reminders. Test: integration `reminders_store_test.go` "due reminders listed per user", "cancelled reminder never delivered", "delivered once marked".
 
 ## 2. Tools
 

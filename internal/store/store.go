@@ -150,6 +150,36 @@ type PendingUpdate struct {
 	Error      string
 }
 
+// ErrTaskNotFound is returned when a task does not exist or belongs to another user. The two are
+// not told apart.
+var ErrTaskNotFound = errors.New("task not found")
+
+// ErrReminderNotFound is returned when a reminder does not exist, belongs to another user, or is
+// no longer pending (delivered or cancelled). These are not told apart.
+var ErrReminderNotFound = errors.New("reminder not found")
+
+// Task is a task the owner keeps. DueDate is a calendar day, YYYY-MM-DD, or empty for none.
+type Task struct {
+	ID        int64
+	UserID    identity.UserID
+	Title     string
+	DueDate   string
+	CreatedAt time.Time
+	DoneAt    *time.Time // nil while the task is open
+}
+
+// Reminder asks for Text to be sent to ChatID at DueAt.
+type Reminder struct {
+	ID          int64
+	UserID      identity.UserID
+	Text        string
+	DueAt       time.Time
+	ChatID      int64
+	CreatedAt   time.Time
+	DeliveredAt *time.Time // nil until sent
+	CancelledAt *time.Time // nil unless cancelled
+}
+
 // Store persists conversations, messages and model calls. Every method takes the user ID
 // explicitly and must call RequireUser before doing any work.
 type Store interface {
@@ -185,6 +215,37 @@ type Store interface {
 	MarkCardSent(ctx context.Context, user identity.UserID, id string, chatID int64, at time.Time) error
 	// UnsentCards returns the user's proposed, unexpired actions whose cards were not delivered.
 	UnsentCards(ctx context.Context, user identity.UserID, now time.Time) ([]PendingAction, error)
+
+	// AddTask stores a task and returns it with its ID.
+	AddTask(ctx context.Context, user identity.UserID, task Task) (Task, error)
+	// ListTasks returns the user's tasks, open ones first in due-day order with undated last. Done
+	// tasks are included only when includeDone is set.
+	ListTasks(ctx context.Context, user identity.UserID, includeDone bool) ([]Task, error)
+	// GetTask returns one of the user's tasks, or ErrTaskNotFound.
+	GetTask(ctx context.Context, user identity.UserID, id int64) (Task, error)
+	// CompleteTask marks one of the user's tasks done at the given time. Completing a done task
+	// changes nothing.
+	CompleteTask(ctx context.Context, user identity.UserID, id int64, at time.Time) error
+	// DeleteTask removes one of the user's tasks.
+	DeleteTask(ctx context.Context, user identity.UserID, id int64) error
+
+	// AddReminder stores a reminder and returns it with its ID.
+	AddReminder(ctx context.Context, user identity.UserID, reminder Reminder) (Reminder, error)
+	// GetReminder returns one of the user's reminders, or ErrReminderNotFound.
+	GetReminder(ctx context.Context, user identity.UserID, id int64) (Reminder, error)
+	// ListReminders returns the user's pending reminders, earliest first.
+	ListReminders(ctx context.Context, user identity.UserID) ([]Reminder, error)
+	// DueReminders returns the user's pending reminders whose time has come by now.
+	DueReminders(ctx context.Context, user identity.UserID, now time.Time) ([]Reminder, error)
+	// CancelReminder cancels one of the user's pending reminders. Otherwise ErrReminderNotFound.
+	CancelReminder(ctx context.Context, user identity.UserID, id int64, at time.Time) error
+	// MarkReminderDelivered records that a pending reminder was sent. It reports false when the
+	// reminder was no longer pending.
+	MarkReminderDelivered(ctx context.Context, user identity.UserID, id int64, at time.Time) (bool, error)
+	// UsersWithDueReminders returns the IDs of the users that have a pending reminder due by now,
+	// for all users. It is the one reminder query without a user ID: it returns IDs only, and each
+	// reminder is then read with its owner in context.
+	UsersWithDueReminders(ctx context.Context, now time.Time) ([]identity.UserID, error)
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's

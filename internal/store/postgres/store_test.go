@@ -28,7 +28,7 @@ const (
 )
 
 var appTables = []string{
-	"conversations", "messages", "model_calls", "pending_actions", "schema_migrations", "tool_calls", "user_identities", "users",
+	"conversations", "messages", "model_calls", "pending_actions", "reminders", "schema_migrations", "tasks", "tool_calls", "user_identities", "users",
 }
 
 func tables(t *testing.T, pool *pgxpool.Pool) []string {
@@ -153,7 +153,7 @@ func TestFailedMigrationLeavesNothingApplied(t *testing.T) {
 func TestUserDataTablesRequireUserID(t *testing.T) {
 	pool := migrated(t)
 
-	for _, table := range []string{"user_identities", "conversations", "messages", "model_calls", "pending_actions"} {
+	for _, table := range []string{"user_identities", "conversations", "messages", "model_calls", "pending_actions", "tasks", "reminders"} {
 		t.Run(table, func(t *testing.T) {
 			var nullable string
 			err := pool.QueryRow(context.Background(), `
