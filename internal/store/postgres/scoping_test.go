@@ -36,6 +36,9 @@ func TestUnscopedCallReturnsError(t *testing.T) {
 		{"RecordModelCall", func(ctx context.Context) error {
 			return st.RecordModelCall(ctx, user, store.ModelCall{})
 		}},
+		{"ProposeAction", func(ctx context.Context) error {
+			return st.ProposeAction(ctx, user, store.PendingAction{})
+		}},
 	}
 	contexts := []struct {
 		name string

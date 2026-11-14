@@ -269,6 +269,23 @@ func (s *Store) RecordToolCall(ctx context.Context, user identity.UserID, call s
 	return nil
 }
 
+// ProposeAction implements store.Store.
+func (s *Store) ProposeAction(ctx context.Context, user identity.UserID, action store.PendingAction) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO pending_actions (id, user_id, tool_name, args_json, args_hash, preview,
+			state, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		action.ID, user, action.ToolName, action.ArgsJSON, action.ArgsHash, action.Preview,
+		action.State, action.CreatedAt, action.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("propose action: %w", err)
+	}
+	return nil
+}
+
 // conversationError turns the composite foreign key's refusal into ErrConversationNotFound.
 func conversationError(err error) error {
 	var pgErr *pgconn.PgError

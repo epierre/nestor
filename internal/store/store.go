@@ -89,6 +89,26 @@ type ToolCall struct {
 	Latency        time.Duration
 }
 
+// Values of PendingAction.State. Only the proposed state is written so far; the others are
+// listed so the stored states match the design.
+const (
+	PendingProposed = "proposed"
+)
+
+// PendingAction is a critical tool call waiting for its user's approval. ArgsJSON is the exact
+// text that ArgsHash covers.
+type PendingAction struct {
+	ID        string
+	UserID    identity.UserID
+	ToolName  string
+	ArgsJSON  json.RawMessage
+	ArgsHash  string
+	Preview   string
+	State     string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+}
+
 // Store persists conversations, messages and model calls. Every method takes the user ID
 // explicitly and must call RequireUser before doing any work.
 type Store interface {
@@ -101,6 +121,8 @@ type Store interface {
 	RecentMessages(ctx context.Context, user identity.UserID, conversationID int64, limit int) ([]Message, error)
 	RecordModelCall(ctx context.Context, user identity.UserID, call ModelCall) error
 	RecordToolCall(ctx context.Context, user identity.UserID, call ToolCall) error
+	// ProposeAction stores a new pending action owned by user.
+	ProposeAction(ctx context.Context, user identity.UserID, action PendingAction) error
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's

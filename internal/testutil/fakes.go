@@ -124,6 +124,7 @@ type FakeStore struct {
 	messages      []store.Message
 	modelCalls    []store.ModelCall
 	toolCalls     []store.ToolCall
+	actions       []store.PendingAction
 	identities    map[identityKey]identity.UserID
 }
 
@@ -306,6 +307,31 @@ func (s *FakeStore) ToolCalls(user identity.UserID) []store.ToolCall {
 	for _, c := range s.toolCalls {
 		if c.UserID == user {
 			found = append(found, c)
+		}
+	}
+	return found
+}
+
+// ProposeAction implements store.Store.
+func (s *FakeStore) ProposeAction(ctx context.Context, user identity.UserID, action store.PendingAction) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	action.UserID = user
+	s.actions = append(s.actions, action)
+	return nil
+}
+
+// PendingActions returns the pending actions proposed for user.
+func (s *FakeStore) PendingActions(user identity.UserID) []store.PendingAction {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []store.PendingAction
+	for _, a := range s.actions {
+		if a.UserID == user {
+			found = append(found, a)
 		}
 	}
 	return found
