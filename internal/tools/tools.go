@@ -32,3 +32,8 @@ type Tool interface {
 	Preview(args json.RawMessage) (string, error)
 	Execute(ctx context.Context, args json.RawMessage) (Result, error)
 }
+
+// MarkData wraps tool output in a marker stating it is untrusted data.
+func MarkData(content string) string {
+	return "[data]\n" + content
+}

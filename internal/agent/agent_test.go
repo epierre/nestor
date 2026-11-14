@@ -18,6 +18,7 @@ import (
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
+	"github.com/epierre/nestor/internal/tools"
 )
 
 var _ channel.Handler = (*Agent)(nil)
@@ -611,4 +612,82 @@ func TestNewOnlyMatchesTheWholeCommand(t *testing.T) {
 	if got := send(t, newAgent(client), 1, "/newsletter"); got != "reply 1" {
 		t.Errorf("got reply %q, want the model's", got)
 	}
+}
+
+func TestToolDispatch(t *testing.T) {
+	t.Run("read tool executes and result returned", func(t *testing.T) {
+		call := model.ToolCall{ID: "call_time", Name: "current_time", Arguments: json.RawMessage(`{}`)}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "The time is 12:00."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewCurrentTimeToolWithClock(func() time.Time {
+			return time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+		}))
+
+		opts := testOptions()
+		opts.Tools = reg
+		a := New(client, testutil.NewFakeStore(), opts)
+
+		reply := send(t, a, 1, "what time is it?")
+		if reply != "The time is 12:00." {
+			t.Errorf("got reply %q, want 'The time is 12:00.'", reply)
+		}
+
+		req := lastRequest(t, client)
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if lastMsg.Role != model.RoleTool {
+			t.Fatalf("last message role: got %q, want %q", lastMsg.Role, model.RoleTool)
+		}
+		if lastMsg.ToolCallID != "call_time" {
+			t.Errorf("tool call id: got %q, want 'call_time'", lastMsg.ToolCallID)
+		}
+		if !strings.Contains(lastMsg.Content, "2026-11-14") {
+			t.Errorf("tool message content does not contain date: %q", lastMsg.Content)
+		}
+		if !strings.HasPrefix(lastMsg.Content, "[data]") {
+			t.Errorf("tool message content not marked as data: %q", lastMsg.Content)
+		}
+	})
+
+	t.Run("unknown tool yields error result", func(t *testing.T) {
+		call := model.ToolCall{ID: "call_unknown", Name: "delete_all_email", Arguments: json.RawMessage(`{}`)}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "I cannot do that."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+
+		reg := tools.NewRegistry()
+		opts := testOptions()
+		opts.Tools = reg
+		a := New(client, testutil.NewFakeStore(), opts)
+
+		reply := send(t, a, 1, "delete email")
+		if reply != "I cannot do that." {
+			t.Errorf("got reply %q, want 'I cannot do that.'", reply)
+		}
+
+		req := lastRequest(t, client)
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if lastMsg.Role != model.RoleTool {
+			t.Fatalf("last message role: got %q, want %q", lastMsg.Role, model.RoleTool)
+		}
+		if lastMsg.ToolCallID != "call_unknown" {
+			t.Errorf("tool call id: got %q, want 'call_unknown'", lastMsg.ToolCallID)
+		}
+		if !strings.Contains(lastMsg.Content, "unknown tool") {
+			t.Errorf("tool message content does not mention unknown tool: %q", lastMsg.Content)
+		}
+		if !strings.HasPrefix(lastMsg.Content, "[data]") {
+			t.Errorf("tool message content not marked as data: %q", lastMsg.Content)
+		}
+	})
 }

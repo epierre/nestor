@@ -11,6 +11,7 @@ import (
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store"
+	"github.com/epierre/nestor/internal/tools"
 )
 
 const (
@@ -23,12 +24,20 @@ const (
 	toolsUnavailable = "error: no tools are available"
 )
 
+// ToolRegistry looks up tools and lists them for the model.
+type ToolRegistry interface {
+	Tools() []model.Tool
+	Lookup(name string) (tools.Tool, error)
+	Validate(name string, args json.RawMessage) error
+}
+
 // Options configures an Agent.
 type Options struct {
 	Model         string // proxy alias
 	SystemPrompt  string
 	HistoryLimit  int // messages of the conversation sent to the model
 	MaxIterations int // model calls allowed for one message
+	Tools         ToolRegistry
 }
 
 // Agent runs the conversation loop for one message at a time.
@@ -72,8 +81,17 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 	}
 
 	messages := a.prompt(history)
+	var modelTools []model.Tool
+	if a.opts.Tools != nil {
+		modelTools = a.opts.Tools.Tools()
+	}
+
 	for range a.opts.MaxIterations {
-		resp, callErr := a.client.Complete(ctx, model.CompletionRequest{Model: a.opts.Model, Messages: messages})
+		resp, callErr := a.client.Complete(ctx, model.CompletionRequest{
+			Model:    a.opts.Model,
+			Messages: messages,
+			Tools:    modelTools,
+		})
 		if err := a.recordCalls(ctx, user, conversation.ID, resp); err != nil {
 			return "", err
 		}
@@ -87,7 +105,11 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 			}
 			return resp.Content, nil
 		}
-		messages = appendToolRefusals(messages, resp)
+		if a.opts.Tools == nil {
+			messages = appendToolRefusals(messages, resp)
+		} else {
+			messages = a.dispatchToolCalls(ctx, messages, resp)
+		}
 	}
 	slog.WarnContext(ctx, "model call limit reached", "max_iterations", a.opts.MaxIterations)
 	return noticeLoopLimit, nil
@@ -150,6 +172,37 @@ func appendToolRefusals(messages []model.Message, resp model.CompletionResponse)
 			Role:       model.RoleTool,
 			ToolCallID: call.ID,
 			Content:    toolsUnavailable,
+		})
+	}
+	return messages
+}
+
+func (a *Agent) dispatchToolCalls(ctx context.Context, messages []model.Message, resp model.CompletionResponse) []model.Message {
+	messages = append(messages, model.Message{
+		Role:      model.RoleAssistant,
+		ToolCalls: resp.ToolCalls,
+	})
+	for _, call := range resp.ToolCalls {
+		tool, err := a.opts.Tools.Lookup(call.Name)
+		var content string
+		if err != nil {
+			content = tools.MarkData(fmt.Sprintf("error: unknown tool %q", call.Name))
+		} else if valErr := a.opts.Tools.Validate(call.Name, call.Arguments); valErr != nil {
+			content = tools.MarkData(fmt.Sprintf("error: invalid arguments: %v", valErr))
+		} else if tool.Risk() == tools.RiskCritical {
+			content = tools.MarkData(fmt.Sprintf("error: critical tool %q requires approval gate", call.Name))
+		} else {
+			res, execErr := tool.Execute(ctx, call.Arguments)
+			if execErr != nil {
+				content = tools.MarkData(fmt.Sprintf("error: %v", execErr))
+			} else {
+				content = tools.MarkData(res.Content)
+			}
+		}
+		messages = append(messages, model.Message{
+			Role:       model.RoleTool,
+			ToolCallID: call.ID,
+			Content:    content,
 		})
 	}
 	return messages
