@@ -146,7 +146,8 @@ func (s *Store) GetReminder(ctx context.Context, user identity.UserID, id int64)
 	}
 	r, err := scanReminder(s.pool.QueryRow(ctx, `
 		SELECT `+reminderColumns+`
-		FROM reminders WHERE id = $1 AND user_id = $2`, id, user))
+		FROM reminders
+		WHERE id = $1 AND user_id = $2 AND delivered_at IS NULL AND cancelled_at IS NULL`, id, user))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.Reminder{}, store.ErrReminderNotFound
 	}

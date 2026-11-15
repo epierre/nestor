@@ -122,7 +122,7 @@ func (s *FakeStore) AddReminder(ctx context.Context, user identity.UserID, r sto
 	if err := store.RequireUser(ctx, user); err != nil {
 		return store.Reminder{}, err
 	}
-	if len(r.Text) == 0 {
+	if len(r.Text) == 0 || len([]rune(r.Text)) > 500 {
 		return store.Reminder{}, errBadTitle
 	}
 	s.mu.Lock()
@@ -143,7 +143,7 @@ func (s *FakeStore) GetReminder(ctx context.Context, user identity.UserID, id in
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i := s.reminderIndex(user, id)
-	if i < 0 {
+	if i < 0 || s.reminders[i].DeliveredAt != nil || s.reminders[i].CancelledAt != nil {
 		return store.Reminder{}, store.ErrReminderNotFound
 	}
 	return s.reminders[i], nil
