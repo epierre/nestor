@@ -6,7 +6,7 @@
 
 ## 2. Background sweeps and scheduler
 
-- [ ] 2.1 Update `approval.SweepStale` to iterate `ListActiveUsers`, scope each `FailStaleApprovals` call with `identity.WithUser(ctx, user)`, and skip disabled users while continuing across active users on per-user errors. Tests: `internal/approval/approval_test.go` `TestSweepScopesQueriesPerActiveUser` and `TestSweepSkipsDisabledUser`.
+- [x] 2.1 Update `approval.SweepStale` to iterate `ListActiveUsers`, scope each `FailStaleApprovals` call with `identity.WithUser(ctx, user)`, and skip disabled users while continuing across active users on per-user errors. Tests: `internal/approval/approval_test.go` `TestSweepScopesQueriesPerActiveUser` and `TestSweepSkipsDisabledUser`.
 - [ ] 2.2 Update `reminders.DueStore` and `reminders.deliverDue` to use `ListActiveUsers`, fetching and delivering due reminders only for active allowlisted users with each user's ID in context. Tests: `internal/reminders/scheduler_test.go` `TestTwoUsersDueAtOnceScopedPerUser` and `TestDisabledUserReminderNotDelivered`.
 
 ## 3. Verification

@@ -628,3 +628,96 @@ func TestProposalPreviewUsesStoredData(t *testing.T) {
 		t.Errorf("preview %q, want the stored title from PreviewFor", action.Preview)
 	}
 }
+
+// sweepSpyStore records per-user FailStaleApprovals calls and can fail one user's sweep.
+type sweepSpyStore struct {
+	*testutil.FakeStore
+	failUser identity.UserID
+	failErr  error
+	calls    []identity.UserID
+}
+
+func (s *sweepSpyStore) FailStaleApprovals(ctx context.Context, user identity.UserID, cutoff time.Time) ([]store.FailedApproval, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	s.calls = append(s.calls, user)
+	if user == s.failUser && s.failErr != nil {
+		return nil, s.failErr
+	}
+	return s.FakeStore.FailStaleApprovals(ctx, user, cutoff)
+}
+
+func TestSweepScopesQueriesPerActiveUser(t *testing.T) {
+	t.Run("scopes each user separately", func(t *testing.T) {
+		h := newHarness(t)
+		h.stallWithCard(t, testUser, 900)
+		h.stallWithCard(t, other, 901)
+		spy := &sweepSpyStore{FakeStore: h.st}
+		notifier := &fakeNotifier{}
+
+		n, err := SweepStale(context.Background(), spy, notifier, h.now.Add(10*time.Minute), 5*time.Minute)
+		if err != nil {
+			t.Fatalf("SweepStale: %v", err)
+		}
+		if n != 2 {
+			t.Errorf("swept %d actions, want 2", n)
+		}
+		if len(spy.calls) != 2 || spy.calls[0] != testUser || spy.calls[1] != other {
+			t.Errorf("FailStaleApprovals calls = %v, want [%d %d]", spy.calls, testUser, other)
+		}
+		if len(notifier.sent) != 2 || notifier.sent[0].chat != 900 || notifier.sent[1].chat != 901 {
+			t.Errorf("notices %+v, want one per active user's chat", notifier.sent)
+		}
+	})
+
+	t.Run("continues across active users when one user fails", func(t *testing.T) {
+		h := newHarness(t)
+		h.stallWithCard(t, testUser, 900)
+		bAction := h.stallWithCard(t, other, 901)
+		boom := errors.New("row lock timeout")
+		spy := &sweepSpyStore{FakeStore: h.st, failUser: testUser, failErr: boom}
+		notifier := &fakeNotifier{}
+
+		n, err := SweepStale(context.Background(), spy, notifier, h.now.Add(10*time.Minute), 5*time.Minute)
+		if !errors.Is(err, boom) {
+			t.Fatalf("err = %v, want %v", err, boom)
+		}
+		if n != 1 {
+			t.Errorf("swept %d actions, want 1 for the healthy user", n)
+		}
+		if got := h.stored(t, other, bAction.ID); got.State != store.PendingFailed {
+			t.Errorf("other user's action state %q, want failed", got.State)
+		}
+		if len(notifier.sent) != 1 || notifier.sent[0].chat != 901 {
+			t.Errorf("notices %+v, want other user's notice sent to chat 901", notifier.sent)
+		}
+	})
+}
+
+func TestSweepSkipsDisabledUser(t *testing.T) {
+	h := newHarness(t)
+	h.st.AddIdentity("telegram", "100", testUser)
+	h.st.AddIdentity("telegram", "200", other)
+	disabledAction := h.stallWithCard(t, testUser, 900)
+	activeAction := h.stallWithCard(t, other, 901)
+	h.st.DisableIdentity("telegram", "100")
+	notifier := &fakeNotifier{}
+
+	n, err := SweepStale(context.Background(), h.st, notifier, h.now.Add(10*time.Minute), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("swept %d actions, want 1 (only active user)", n)
+	}
+	if len(notifier.sent) != 1 || notifier.sent[0].chat != 901 {
+		t.Errorf("notices %+v, want only active user's chat 901", notifier.sent)
+	}
+	if got := h.stored(t, testUser, disabledAction.ID); got.State != store.PendingApproved {
+		t.Errorf("disabled user's action state %q, want untouched approved", got.State)
+	}
+	if got := h.stored(t, other, activeAction.ID); got.State != store.PendingFailed {
+		t.Errorf("active user's action state %q, want failed", got.State)
+	}
+}
