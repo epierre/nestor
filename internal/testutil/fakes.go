@@ -134,6 +134,8 @@ type FakeStore struct {
 	tasks         []store.Task
 	reminders     []store.Reminder
 	identities    map[identityKey]identity.UserID
+	knownUsers    map[identity.UserID]bool
+	disabledUsers map[identity.UserID]bool
 }
 
 type identityKey struct {
@@ -167,6 +169,14 @@ func (s *FakeStore) owns(user identity.UserID, conversationID int64) bool {
 	})
 }
 
+// touchUser records user as known unless explicitly disabled. The caller holds s.mu.
+func (s *FakeStore) touchUser(user identity.UserID) {
+	if s.knownUsers == nil {
+		s.knownUsers = make(map[identity.UserID]bool)
+	}
+	s.knownUsers[user] = true
+}
+
 // AddIdentity makes the platform identity resolve to user.
 func (s *FakeStore) AddIdentity(platform, externalID string, user identity.UserID) {
 	s.mu.Lock()
@@ -175,13 +185,43 @@ func (s *FakeStore) AddIdentity(platform, externalID string, user identity.UserI
 		s.identities = make(map[identityKey]identity.UserID)
 	}
 	s.identities[identityKey{platform, externalID}] = user
+	s.touchUser(user)
+	delete(s.disabledUsers, user)
 }
 
-// DisableIdentity stops the platform identity from resolving.
+// DisableIdentity stops the platform identity from resolving, and disables its user when no enabled
+// identity remains for them.
 func (s *FakeStore) DisableIdentity(platform, externalID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	user, ok := s.identities[identityKey{platform, externalID}]
 	delete(s.identities, identityKey{platform, externalID})
+	if !ok {
+		return
+	}
+	for _, remaining := range s.identities {
+		if remaining == user {
+			return
+		}
+	}
+	if s.disabledUsers == nil {
+		s.disabledUsers = make(map[identity.UserID]bool)
+	}
+	s.disabledUsers[user] = true
+}
+
+// ListActiveUsers implements store.Store.
+func (s *FakeStore) ListActiveUsers(_ context.Context) ([]identity.UserID, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var active []identity.UserID
+	for user := range s.knownUsers {
+		if !s.disabledUsers[user] {
+			active = append(active, user)
+		}
+	}
+	slices.Sort(active)
+	return active, nil
 }
 
 // ResolveIdentity returns the user of an enabled platform identity.
@@ -202,6 +242,7 @@ func (s *FakeStore) ActiveConversation(ctx context.Context, user identity.UserID
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.touchUser(user)
 	if c := s.open(user); c != nil {
 		return *c, nil
 	}
@@ -217,6 +258,7 @@ func (s *FakeStore) CloseConversation(ctx context.Context, user identity.UserID)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.touchUser(user)
 	if c := s.open(user); c != nil {
 		now := time.Now()
 		c.EndedAt = &now
@@ -327,6 +369,7 @@ func (s *FakeStore) ProposeAction(ctx context.Context, user identity.UserID, act
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.touchUser(user)
 	action.UserID = user
 	s.actions = append(s.actions, action)
 	return nil
@@ -492,13 +535,16 @@ func (s *FakeStore) actionIndex(user identity.UserID, id string) int {
 }
 
 // FailStaleApprovals implements store.Store.
-func (s *FakeStore) FailStaleApprovals(ctx context.Context, cutoff time.Time) ([]store.FailedApproval, error) {
+func (s *FakeStore) FailStaleApprovals(ctx context.Context, user identity.UserID, cutoff time.Time) ([]store.FailedApproval, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var failed []store.FailedApproval
 	for i := range s.actions {
 		a := &s.actions[i]
-		if a.State == store.PendingApproved && a.DecidedAt != nil && a.DecidedAt.Before(cutoff) {
+		if a.UserID == user && a.State == store.PendingApproved && a.DecidedAt != nil && a.DecidedAt.Before(cutoff) {
 			a.State = store.PendingFailed
 			a.Error = store.OutcomeUnknownError
 			failed = append(failed, store.FailedApproval{ID: a.ID, UserID: a.UserID, Preview: a.Preview, ChatID: a.NotifyChatID})

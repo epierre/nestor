@@ -14,11 +14,19 @@ The system SHALL NOT execute a tool call with risk level critical when the model
 - **THEN** no message is sent by the tool, a pending action in state proposed owned by user A exists, and the model receives a tool result containing the pending action ID
 
 ### Requirement: Approval card
-The system SHALL send the approval card only to the user who owns the pending action, showing the preview generated from the stored arguments, with Approve and Reject controls bound to the pending action ID.
+The system SHALL send the approval card only to the user who owns the pending action, showing a preview generated from the stored arguments and, when needed by the tool, the requesting user's own stored data, with Approve and Reject controls bound to the pending action ID. When delivering an approval card fails, the system SHALL re-send the card on the owner's next message while the action remains proposed and unexpired.
 
 #### Scenario: Card shows what will run
 - **WHEN** a pending action for `notify_self` with text "Dentist at 3pm" is created for user A
 - **THEN** user A receives a card whose text includes "Dentist at 3pm" with Approve and Reject buttons, and no other user receives it
+
+#### Scenario: Preview uses the owner's stored item
+- **WHEN** a critical tool builds its preview from the owner's stored data as well as the call arguments
+- **THEN** the pending action stores the preview resolved under the owner's user ID in context
+
+#### Scenario: Undelivered card retried on next message
+- **WHEN** sending an approval card fails when the action is proposed and the owner sends another message before the action expires
+- **THEN** the approval card for that pending action is sent once on the next message and not sent again on later messages
 
 ### Requirement: Approval only from the action's user
 The system MUST execute a critical action only in response to an Approve control activated by the Telegram identity of the user who owns the action, and MUST NOT accept approval from message text, model output, tool results or any other user.
@@ -107,7 +115,7 @@ The project SHALL maintain an eval scenario set covering prompt-injection and cr
 - **THEN** the eval asserts the action is still proposed and nothing executed
 
 ### Requirement: Stale approvals are failed, never retried
-The system SHALL move an action still in state approved, whose approval is older than the configured stale-approval threshold, to state failed with an outcome-unknown error, at startup and periodically. The system MUST NOT execute such an action again. This sweep is the only operation that spans users: it reads no user data, returns no action contents, and changes only the state of approved actions past the threshold.
+The system SHALL move an action still in state approved, whose approval is older than the configured stale-approval threshold, to state failed with an outcome-unknown error, at startup and periodically. The system MUST NOT execute such an action again.
 
 #### Scenario: Crash after claim
 - **WHEN** an action has been claimed as approved, the process stops before its outcome is recorded, and the sweep runs after the threshold has passed
@@ -120,3 +128,18 @@ The system SHALL move an action still in state approved, whose approval is older
 #### Scenario: Fresh approval left alone
 - **WHEN** an action has been approved less than the threshold ago and the sweep runs
 - **THEN** the action's state is unchanged and nothing is executed
+
+### Requirement: Unknown outcomes are reported to their user
+The system SHALL report an approved action whose outcome is unknown to its owner: the owner's conversation records the outcome, and the owner's card chat receives a message that names the action's preview and states that the outcome is unknown. The system MUST NOT execute, retry or approve the action as part of reporting it.
+
+#### Scenario: Stale approval reported to its owner
+- **WHEN** the sweep fails an approved action whose card chat was recorded
+- **THEN** the owner's conversation records that the outcome is unknown, the owner's card chat receives a message naming the preview and stating the outcome is unknown, and the tool is not executed
+
+#### Scenario: Notice not delivered
+- **WHEN** sending the notice to the card chat fails
+- **THEN** the notice is sent again on the owner's next message, and the action remains failed
+
+#### Scenario: Notice not shown to another user
+- **WHEN** another user sends a message while the owner's notice is undelivered
+- **THEN** the other user receives nothing about the owner's action

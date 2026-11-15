@@ -28,6 +28,7 @@ func (s *FakeStore) AddTask(ctx context.Context, user identity.UserID, task stor
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.touchUser(user)
 	task.ID = s.id()
 	task.UserID = user
 	task.CreatedAt = time.Now()
@@ -126,6 +127,7 @@ func (s *FakeStore) AddReminder(ctx context.Context, user identity.UserID, r sto
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.touchUser(user)
 	r.ID = s.id()
 	r.UserID = user
 	r.CreatedAt = time.Now()
@@ -206,19 +208,6 @@ func (s *FakeStore) MarkReminderDelivered(ctx context.Context, user identity.Use
 	}
 	s.reminders[i].DeliveredAt = &at
 	return true, nil
-}
-
-// UsersWithDueReminders implements store.Store.
-func (s *FakeStore) UsersWithDueReminders(_ context.Context, now time.Time) ([]identity.UserID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var users []identity.UserID
-	for _, r := range s.reminders {
-		if r.DeliveredAt == nil && r.CancelledAt == nil && !r.DueAt.After(now) && !slices.Contains(users, r.UserID) {
-			users = append(users, r.UserID)
-		}
-	}
-	return users, nil
 }
 
 func (s *FakeStore) taskIndex(user identity.UserID, id int64) int {

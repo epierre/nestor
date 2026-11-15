@@ -1,7 +1,7 @@
 ## 1. Storage
 
 - [x] 1.1 Migration `0005_pending_notices`: `notify_chat_id` and `outcome_notice_sent_at` on `pending_actions`. Test: existing `TestMigrateUpAndDown` plus integration `TestCardDeliveryRecordsChat`.
-- [x] 1.2 `MarkCardSent` records the chat; `FailStaleApprovals` returns the stale actions with owner and chat instead of a count. Test: integration `TestSweepReturnsStaleRowsWithTheirOwnChats`.
+- [x] 1.2 `MarkCardSent` records the chat; `FailStaleApprovals` returns the stale actions with owner, preview and chat instead of a count. Test: integration `TestSweepReturnsStaleRowsWithTheirOwnChats`.
 - [x] 1.3 `UnnotifiedOutcomes(ctx, user)` lists the owner's failed-as-unknown actions without a sent notice; `MarkOutcomeNoticed` records a sent one. Test: integration `TestUnnotifiedOutcomesPerUserUntilMarked`.
 
 ## 2. Channel boundary

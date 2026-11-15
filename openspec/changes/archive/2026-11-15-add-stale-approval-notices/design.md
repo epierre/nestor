@@ -13,8 +13,8 @@ the ID to the store when it marks the card sent. The agent never sees a Telegram
 
 ## Notices
 
-`FailStaleApprovals` changes from returning a count to returning the affected actions: ID, owner
-and recorded chat. The sweep then, for each one, with the owner in context:
+`FailStaleApprovals` changes from returning a count to returning the affected actions: ID, owner,
+preview and recorded chat. The sweep then, for each one, with the owner in context:
 
 1. appends the outcome note to the owner's open conversation (same text rules as task 4.2:
    action ID and outcome only),
@@ -24,8 +24,8 @@ and recorded chat. The sweep then, for each one, with the owner in context:
 Step 1 happens whether or not step 2 works, so the model always learns the outcome.
 
 A failed send (step 2) leaves `outcome_notice_sent_at` empty. On the owner's next message, the
-agent lists that owner's unnotified outcomes and sends them to the chat of that message, then marks
-them, the same way it re-sends cards (task 4.4).
+agent lists that owner's unnotified outcomes and sends each one to its recorded card chat, then
+marks it, the same way it re-sends cards (task 4.4).
 
 ## Interfaces
 

@@ -230,26 +230,3 @@ func (s *Store) MarkReminderDelivered(ctx context.Context, user identity.UserID,
 	}
 	return tag.RowsAffected() == 1, nil
 }
-
-// UsersWithDueReminders implements store.Store. It is deliberately unscoped: see the interface.
-func (s *Store) UsersWithDueReminders(ctx context.Context, now time.Time) ([]identity.UserID, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT user_id FROM reminders
-		WHERE delivered_at IS NULL AND cancelled_at IS NULL AND due_at <= $1`, now)
-	if err != nil {
-		return nil, fmt.Errorf("list users with due reminders: %w", err)
-	}
-	defer rows.Close()
-	var users []identity.UserID
-	for rows.Next() {
-		var id identity.UserID
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan user: %w", err)
-		}
-		users = append(users, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list users with due reminders: %w", err)
-	}
-	return users, nil
-}

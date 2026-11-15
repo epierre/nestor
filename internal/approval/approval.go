@@ -282,23 +282,37 @@ func (g *Gate) instant() time.Time {
 	return g.now().UTC().Truncate(time.Microsecond)
 }
 
-// SweepStale fails every action approved more than staleAfter before now, for all users, and
+// SweepStale fails every action approved more than staleAfter before now for each active user, and
 // returns how many it failed. For each one, the owner's conversation records that the outcome is
 // unknown, and the owner is told in the card's chat through out. A nil out sends no notices. A
 // failed action is never executed again.
 func SweepStale(ctx context.Context, st store.Store, out Notifier, now time.Time, staleAfter time.Duration) (int64, error) {
-	failed, err := st.FailStaleApprovals(ctx, now.Add(-staleAfter))
+	users, err := st.ListActiveUsers(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("sweep stale approvals: %w", err)
+		return 0, fmt.Errorf("list active users for approval sweep: %w", err)
 	}
-	for _, f := range failed {
-		owner := identity.WithUser(ctx, f.UserID)
-		recordNote(owner, st, f.UserID, fmt.Sprintf(noteUnknown, f.ID))
-		SendOutcomeNotice(owner, st, out, store.PendingAction{
-			ID: f.ID, UserID: f.UserID, Preview: f.Preview, NotifyChatID: f.ChatID,
-		})
+	cutoff := now.Add(-staleAfter)
+	var (
+		total    int64
+		sweepErr error
+	)
+	for _, user := range users {
+		owner := identity.WithUser(ctx, user)
+		failed, err := st.FailStaleApprovals(owner, user, cutoff)
+		if err != nil {
+			slog.ErrorContext(owner, "user approval sweep failed", "error", err)
+			sweepErr = errors.Join(sweepErr, fmt.Errorf("sweep user %d stale approvals: %w", user, err))
+			continue
+		}
+		for _, f := range failed {
+			recordNote(owner, st, f.UserID, fmt.Sprintf(noteUnknown, f.ID))
+			SendOutcomeNotice(owner, st, out, store.PendingAction{
+				ID: f.ID, UserID: f.UserID, Preview: f.Preview, NotifyChatID: f.ChatID,
+			})
+		}
+		total += int64(len(failed))
 	}
-	return int64(len(failed)), nil
+	return total, sweepErr
 }
 
 // SendOutcomeNotice tells the owner of an action whose outcome is unknown, in the chat its card
@@ -328,11 +342,11 @@ func RunSweeps(ctx context.Context, st store.Store, out Notifier, staleAfter, ev
 	defer ticker.Stop()
 	for {
 		n, err := SweepStale(ctx, st, out, time.Now(), staleAfter)
-		switch {
-		case err != nil && ctx.Err() == nil:
-			slog.ErrorContext(ctx, "approval sweep failed", "error", err)
-		case n > 0:
+		if n > 0 {
 			slog.WarnContext(ctx, "stale approvals failed as outcome unknown", "count", n)
+		}
+		if err != nil && ctx.Err() == nil {
+			slog.ErrorContext(ctx, "approval sweep failed", "error", err)
 		}
 		select {
 		case <-ctx.Done():
