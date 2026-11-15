@@ -3,6 +3,7 @@ package tools_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -111,4 +112,21 @@ func TestDemoTools(t *testing.T) {
 			t.Errorf("expected current_time and notify_self, got %+v", modelTools)
 		}
 	})
+}
+
+func TestNotifySelfBlankTextFailsValidation(t *testing.T) {
+	reg := tools.NewRegistry()
+	if err := reg.Register(tools.NewNotifySelfTool(nil)); err != nil {
+		t.Fatalf("Register notify_self: %v", err)
+	}
+
+	for _, raw := range []string{`{"text": ""}`, `{"text": "   "}`, `{"text": "\t\n"}`} {
+		err := reg.Validate("notify_self", json.RawMessage(raw))
+		if !errors.Is(err, tools.ErrValidation) {
+			t.Errorf("Validate(%s) = %v, want ErrValidation", raw, err)
+		}
+	}
+	if err := reg.Validate("notify_self", json.RawMessage(`{"text": "Dentist at 3pm"}`)); err != nil {
+		t.Errorf("Validate valid text: %v", err)
+	}
 }

@@ -211,9 +211,11 @@ type Store interface {
 	UnnotifiedOutcomes(ctx context.Context, user identity.UserID) ([]PendingAction, error)
 	// MarkOutcomeNoticed records that the outcome-unknown notice for the action was delivered.
 	MarkOutcomeNoticed(ctx context.Context, user identity.UserID, id string, at time.Time) error
-	// SupersedePending marks the user's other proposed actions for tool as superseded by keepID,
-	// and returns how many it changed.
-	SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error)
+	// SupersedePending marks the user's proposed actions for tool, other than byID and keepIDs, as
+	// superseded by byID, and returns how many it changed.
+	SupersedePending(ctx context.Context, user identity.UserID, tool, byID string, keepIDs ...string) (int64, error)
+	// ProposedActions returns the user's proposed, unexpired actions in creation order.
+	ProposedActions(ctx context.Context, user identity.UserID, now time.Time) ([]PendingAction, error)
 	// MarkCardSent records that the action's card was delivered, to chatID.
 	MarkCardSent(ctx context.Context, user identity.UserID, id string, chatID int64, at time.Time) error
 	// UnsentCards returns the user's proposed, unexpired actions whose cards were not delivered.

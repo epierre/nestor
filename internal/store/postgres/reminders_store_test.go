@@ -113,3 +113,22 @@ func TestReminderScopedToUser(t *testing.T) {
 		t.Errorf("other user lists %+v, want none", list)
 	}
 }
+
+func TestDeliveredOrCancelledReminderNotFoundOnGet(t *testing.T) {
+	st, _, a, _, ctxA, _ := twoScoped(t)
+	delivered := addReminder(t, st, ctxA, a, "delivered one", time.Now().Add(-time.Minute), 501)
+	if ok, err := st.MarkReminderDelivered(ctxA, a, delivered.ID, time.Now()); err != nil || !ok {
+		t.Fatalf("MarkReminderDelivered: ok=%v err=%v", ok, err)
+	}
+	if _, err := st.GetReminder(ctxA, a, delivered.ID); !errors.Is(err, store.ErrReminderNotFound) {
+		t.Errorf("delivered GetReminder: err = %v, want ErrReminderNotFound", err)
+	}
+
+	cancelled := addReminder(t, st, ctxA, a, "cancelled one", time.Now().Add(time.Hour), 501)
+	if err := st.CancelReminder(ctxA, a, cancelled.ID, time.Now()); err != nil {
+		t.Fatalf("CancelReminder: %v", err)
+	}
+	if _, err := st.GetReminder(ctxA, a, cancelled.ID); !errors.Is(err, store.ErrReminderNotFound) {
+		t.Errorf("cancelled GetReminder: err = %v, want ErrReminderNotFound", err)
+	}
+}

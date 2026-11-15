@@ -72,6 +72,7 @@ func newRig(t *testing.T, alias string) *rig {
 		Tools:         reg,
 		Approvals:     r.gate,
 		Cards:         fakeCards{},
+		Location:      loc,
 	})
 	return r
 }

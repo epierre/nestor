@@ -189,3 +189,39 @@ func TestReminderToolRisks(t *testing.T) {
 		}
 	}
 }
+
+func TestCancelNonPendingReminderShowsNoSuchReminder(t *testing.T) {
+	h := newHarness(t)
+	ctx := inChat(owner, ownerChat)
+	if _, err := h.call(t, ctx, "reminder_add", `{"text": "Delivered one", "due": "15:00"}`); err != nil {
+		t.Fatalf("reminder_add: %v", err)
+	}
+	if _, err := h.call(t, ctx, "reminder_add", `{"text": "Cancelled one", "due": "16:00"}`); err != nil {
+		t.Fatalf("reminder_add: %v", err)
+	}
+	if ok, err := h.st.MarkReminderDelivered(ctx, owner, 1, now); err != nil || !ok {
+		t.Fatalf("MarkReminderDelivered: ok=%v err=%v", ok, err)
+	}
+	if err := h.st.CancelReminder(ctx, owner, 2, now); err != nil {
+		t.Fatalf("CancelReminder: %v", err)
+	}
+
+	cancel, _ := h.reg.Lookup("reminder_cancel")
+	for _, id := range []string{"1", "2"} {
+		action, err := h.gate.Propose(ctx, owner, cancel, json.RawMessage(`{"id": `+id+`}`))
+		if err != nil {
+			t.Fatalf("Propose %s: %v", id, err)
+		}
+		if !strings.Contains(action.Preview, "no such reminder") {
+			t.Errorf("id %s preview = %q, want no such reminder", id, action.Preview)
+		}
+		if _, err := h.gate.Decide(ctx, owner, action.ID, approval.Approve); err == nil {
+			t.Errorf("id %s Decide succeeded on non-pending reminder", id)
+		}
+	}
+
+	tooLong := strings.Repeat("x", 501)
+	if _, err := h.st.AddReminder(ctx, owner, store.Reminder{Text: tooLong, DueAt: now.Add(time.Hour), ChatID: ownerChat}); err == nil {
+		t.Error("FakeStore.AddReminder accepted a 501-rune text")
+	}
+}

@@ -60,6 +60,12 @@ type Options struct {
 	// Notices delivers outcome-unknown notices that were not delivered when first due. Without it,
 	// they are not sent again.
 	Notices approval.Notifier
+	// Location adds the current local date, time and IANA zone name to the system prompt on each
+	// turn when set. Without it, SystemPrompt is sent unchanged.
+	Location *time.Location
+	// Now returns the current time for prompt timestamps and card/proposal checks. Without it,
+	// time.Now is used.
+	Now func() time.Time
 }
 
 // Agent runs the conversation loop for one message at a time.
@@ -94,6 +100,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 		return noticeNewConversation, nil
 	}
 	a.resendCards(ctx, user)
+	ctx = approval.WithTurn(ctx)
 	conversation, err := a.store.ActiveConversation(ctx, user)
 	if err != nil {
 		return "", fmt.Errorf("load conversation: %w", err)
@@ -105,8 +112,12 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("load history: %w", err)
 	}
+	proposed, err := a.store.ProposedActions(ctx, user, a.now())
+	if err != nil {
+		return "", fmt.Errorf("load proposed actions: %w", err)
+	}
 
-	messages := a.prompt(history)
+	messages := a.prompt(history, conversation.StartedAt, proposed)
 	var modelTools []model.Tool
 	if a.opts.Tools != nil {
 		modelTools = a.opts.Tools.Tools()
@@ -244,8 +255,9 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 				}
 				a.showCard(ctx, user, action)
 				status = store.ToolCallStatusProposed
-				content = "pending approval " + action.ID
-				resultJSON, _ = json.Marshal(content)
+				pending := "pending approval " + action.ID
+				resultJSON, _ = json.Marshal(pending)
+				content = tools.MarkData(pending)
 			} else {
 				res, execErr := tool.Execute(ctx, call.Arguments)
 				if execErr != nil {
@@ -298,7 +310,7 @@ func (a *Agent) showCard(ctx context.Context, user identity.UserID, action store
 		return
 	}
 	chatID, _ := channel.ChatFrom(ctx)
-	if err := a.store.MarkCardSent(ctx, user, action.ID, chatID, time.Now()); err != nil {
+	if err := a.store.MarkCardSent(ctx, user, action.ID, chatID, a.now()); err != nil {
 		slog.WarnContext(ctx, "approval card delivery not recorded", "action_id", action.ID, "error", err)
 	}
 }
@@ -310,7 +322,7 @@ func (a *Agent) resendCards(ctx context.Context, user identity.UserID) {
 	if a.opts.Cards == nil {
 		return
 	}
-	unsent, err := a.store.UnsentCards(ctx, user, time.Now())
+	unsent, err := a.store.UnsentCards(ctx, user, a.now())
 	if err != nil {
 		slog.WarnContext(ctx, "unsent approval cards not listed", "error", err)
 		return
@@ -336,11 +348,83 @@ func (a *Agent) resendOutcomeNotices(ctx context.Context, user identity.UserID) 
 	}
 }
 
-func (a *Agent) prompt(history []store.Message) []model.Message {
-	messages := make([]model.Message, 0, len(history)+1)
-	messages = append(messages, model.Message{Role: model.RoleSystem, Content: a.opts.SystemPrompt})
-	for _, m := range history {
+func (a *Agent) now() time.Time {
+	if a.opts.Now != nil {
+		return a.opts.Now()
+	}
+	return time.Now()
+}
+
+func (a *Agent) systemPrompt() string {
+	if a.opts.Location == nil {
+		return a.opts.SystemPrompt
+	}
+	local := a.now().In(a.opts.Location)
+	line := fmt.Sprintf("Current time: %s (%s).", local.Format("Monday, 2006-01-02 15:04 MST"), a.opts.Location.String())
+	if a.opts.SystemPrompt == "" {
+		return line
+	}
+	return a.opts.SystemPrompt + "\n" + line
+}
+
+func (a *Agent) prompt(history []store.Message, convStarted time.Time, proposed []store.PendingAction) []model.Message {
+	var active []store.PendingAction
+	convFloor := convStarted.Truncate(time.Microsecond)
+	for _, p := range proposed {
+		if convStarted.IsZero() || !p.CreatedAt.Before(convFloor) {
+			active = append(active, p)
+		}
+	}
+
+	// Reconstruct open proposals right after the prior user turn that produced them so the model can
+	// edit them without any untrusted arguments or previews entering system or user messages.
+	byIndex := make(map[int][]store.PendingAction)
+	if len(active) > 0 && len(history) > 1 {
+		firstUser := -1
+		for i := 0; i < len(history)-1; i++ {
+			if history[i].Role == model.RoleUser {
+				firstUser = i
+				break
+			}
+		}
+		if firstUser >= 0 {
+			for _, p := range active {
+				target := firstUser
+				for i := firstUser; i < len(history)-1; i++ {
+					if history[i].Role == model.RoleUser && !history[i].CreatedAt.Truncate(time.Microsecond).After(p.CreatedAt) {
+						target = i
+					}
+				}
+				byIndex[target] = append(byIndex[target], p)
+			}
+		}
+	}
+
+	messages := make([]model.Message, 0, len(history)+1+2*len(active))
+	messages = append(messages, model.Message{Role: model.RoleSystem, Content: a.systemPrompt()})
+	for i, m := range history {
 		messages = append(messages, model.Message{Role: m.Role, Content: m.Content})
+		if group := byIndex[i]; len(group) > 0 {
+			calls := make([]model.ToolCall, 0, len(group))
+			for _, p := range group {
+				calls = append(calls, model.ToolCall{
+					ID:        "pending_" + p.ID,
+					Name:      p.ToolName,
+					Arguments: p.ArgsJSON,
+				})
+			}
+			messages = append(messages, model.Message{
+				Role:      model.RoleAssistant,
+				ToolCalls: calls,
+			})
+			for _, p := range group {
+				messages = append(messages, model.Message{
+					Role:       model.RoleTool,
+					ToolCallID: "pending_" + p.ID,
+					Content:    tools.MarkData("pending approval " + p.ID),
+				})
+			}
+		}
 	}
 	return messages
 }

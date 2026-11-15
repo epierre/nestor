@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/epierre/nestor/internal/identity"
@@ -114,13 +115,42 @@ func (g *Gate) Propose(ctx context.Context, user identity.UserID, tool tools.Too
 	if err := g.store.ProposeAction(ctx, user, action); err != nil {
 		return store.PendingAction{}, fmt.Errorf("store pending action: %w", err)
 	}
-	// One pending action per tool: the new one replaces the earlier ones, which can no longer be
-	// approved. If this fails, both stay approvable, and each still needs its own approval.
-	if _, err := g.store.SupersedePending(ctx, user, tool.Name(), id); err != nil {
+	keepIDs := recordInTurn(ctx, id)
+	// Proposals from earlier turns for the same tool are superseded by the new one, while siblings
+	// proposed in the same turn stay approvable. If this fails, earlier actions stay approvable too,
+	// and each still needs its own approval.
+	if _, err := g.store.SupersedePending(ctx, user, tool.Name(), id, keepIDs...); err != nil {
 		slog.ErrorContext(ctx, "earlier pending actions not superseded", "action_id", id, "error", err)
 	}
 	action.UserID = user
 	return action, nil
+}
+
+type turnKey struct{}
+
+type turnProposals struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+// WithTurn scopes proposals made during one conversational turn so that multiple critical calls of
+// the same tool in that turn remain proposed alongside each other, while still superseding open
+// proposals from earlier turns.
+func WithTurn(ctx context.Context) context.Context {
+	return context.WithValue(ctx, turnKey{}, &turnProposals{})
+}
+
+func recordInTurn(ctx context.Context, id string) []string {
+	t, ok := ctx.Value(turnKey{}).(*turnProposals)
+	if !ok || t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ids = append(t.ids, id)
+	out := make([]string, len(t.ids))
+	copy(out, t.ids)
+	return out
 }
 
 // previewFor returns the card text for a proposal. A tool that needs stored data for its preview gets

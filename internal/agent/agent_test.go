@@ -104,6 +104,31 @@ func TestRepliesWithFakeModelOutput(t *testing.T) {
 	}
 }
 
+func TestClockAndTimezoneIncludedInSystemPrompt(t *testing.T) {
+	zurich, err := time.LoadLocation("Europe/Zurich")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	fixed := time.Date(2026, 11, 15, 17, 49, 0, 0, time.UTC)
+	opts := testOptions()
+	opts.Location = zurich
+	opts.Now = func() time.Time { return fixed }
+
+	client := numberedReplies()
+	a := New(client, testutil.NewFakeStore(), opts)
+	send(t, a, 1, "what day is tomorrow?")
+
+	sys := lastRequest(t, client).Messages[0]
+	if sys.Role != model.RoleSystem {
+		t.Fatalf("first message role = %q, want system", sys.Role)
+	}
+	for _, want := range []string{"be helpful", "Sunday", "2026-11-15", "18:49", "Europe/Zurich"} {
+		if !strings.Contains(sys.Content, want) {
+			t.Errorf("system prompt %q does not contain %q", sys.Content, want)
+		}
+	}
+}
+
 func TestHandleMessageWithoutUserMakesNoModelCall(t *testing.T) {
 	client := &testutil.FakeModel{}
 
@@ -873,7 +898,7 @@ func TestToolDispatch(t *testing.T) {
 		if len(pending) != 1 {
 			t.Fatalf("got %d pending actions for user 1, want 1", len(pending))
 		}
-		if got, want := toolResult(t, client, "call_crit"), "pending approval "+pending[0].ID; got != want {
+		if got, want := toolResult(t, client, "call_crit"), tools.MarkData("pending approval "+pending[0].ID); got != want {
 			t.Errorf("model saw %q, want %q", got, want)
 		}
 
@@ -1040,7 +1065,7 @@ func TestFailedCardLeavesActionPending(t *testing.T) {
 	if len(pending) != 1 || pending[0].State != store.PendingProposed {
 		t.Fatalf("pending %+v, want one proposed action", pending)
 	}
-	if got, want := toolResult(t, client, "call_card"), "pending approval "+pending[0].ID; got != want {
+	if got, want := toolResult(t, client, "call_card"), tools.MarkData("pending approval "+pending[0].ID); got != want {
 		t.Errorf("model saw %q, want %q", got, want)
 	}
 }
@@ -1111,40 +1136,42 @@ func TestStructuralCriticalToolExecution(t *testing.T) {
 	fset := token.NewFileSet()
 	var callSites []string
 
-	err = filepath.Walk(filepath.Join(dir, "internal"), func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return err
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		rel, _ := filepath.Rel(dir, path)
-		if strings.HasPrefix(rel, "internal/approval") || strings.HasPrefix(rel, "internal/tools") || strings.HasPrefix(rel, "internal/testutil") {
-			return nil
-		}
-
-		node, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			return err
-		}
-
-		ast.Inspect(node, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+	for _, root := range []string{"internal", "cmd"} {
+		err = filepath.Walk(filepath.Join(dir, root), func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Execute" {
-				return true
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
 			}
-			pos := fset.Position(call.Pos())
-			callSites = append(callSites, rel+":"+strconv.Itoa(pos.Line))
-			return true
+			rel, _ := filepath.Rel(dir, path)
+			if strings.HasPrefix(rel, "internal/approval") || strings.HasPrefix(rel, "internal/tools") || strings.HasPrefix(rel, "internal/testutil") {
+				return nil
+			}
+
+			node, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				return err
+			}
+
+			ast.Inspect(node, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Execute" {
+					return true
+				}
+				pos := fset.Position(call.Pos())
+				callSites = append(callSites, rel+":"+strconv.Itoa(pos.Line))
+				return true
+			})
+			return nil
 		})
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("ast walk: %v", err)
+		if err != nil {
+			t.Fatalf("ast walk %s: %v", root, err)
+		}
 	}
 
 	// Verify that the only call site outside approval is in agent.go
@@ -1165,6 +1192,7 @@ func TestEditSupersedesAndRequiresNewApproval(t *testing.T) {
 	opts.Tools = reg
 	opts.Approvals = approval.New(st, reg, time.Hour)
 	opts.Cards = cards
+	var editReq model.CompletionRequest
 	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
 		last := req.Messages[len(req.Messages)-1]
 		call := func(text string) model.CompletionResponse {
@@ -1176,7 +1204,7 @@ func TestEditSupersedesAndRequiresNewApproval(t *testing.T) {
 		case last.Role == model.RoleUser && last.Content == "notify me":
 			return call("Dentist at 3pm"), nil
 		case last.Role == model.RoleUser && last.Content == "make it 4pm":
-			// The first proposal is still in history, so the model can refer to it.
+			editReq = req
 			return call("Dentist at 4pm"), nil
 		}
 		return model.CompletionResponse{Content: "Updated, please approve."}, nil
@@ -1202,6 +1230,77 @@ func TestEditSupersedesAndRequiresNewApproval(t *testing.T) {
 	}
 	if len(cards.shown) != 2 || cards.shown[1].ID != replacement.ID {
 		t.Errorf("cards shown %+v, want a card for the replacement", cards.shown)
+	}
+
+	var sawCall, sawTool bool
+	for _, m := range editReq.Messages {
+		if m.Role == model.RoleSystem && strings.Contains(m.Content, "Dentist at 3pm") {
+			t.Errorf("system message %q carries untrusted proposal arguments", m.Content)
+		}
+		if m.Role == model.RoleAssistant && len(m.ToolCalls) == 1 &&
+			m.ToolCalls[0].Name == "notify_self" && strings.Contains(string(m.ToolCalls[0].Arguments), "Dentist at 3pm") {
+			sawCall = true
+		}
+		if m.Role == model.RoleTool && m.Content == tools.MarkData("pending approval "+original.ID) {
+			sawTool = true
+		}
+	}
+	if !sawCall || !sawTool {
+		t.Errorf("edit request messages %+v, want prior assistant tool call and data-marked pending approval result", editReq.Messages)
+	}
+}
+
+func TestMultipleCriticalCallsInOneTurnStayProposed(t *testing.T) {
+	reg := tools.NewRegistry()
+	sends := 0
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { sends++; return nil }))
+	st := testutil.NewFakeStore()
+	cards := &recordingCards{}
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = cards
+
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		last := req.Messages[len(req.Messages)-1]
+		switch {
+		case last.Role == model.RoleUser && last.Content == "notify twice":
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{
+				{ID: "call_1", Name: "notify_self", Arguments: json.RawMessage(`{"text": "First"}`)},
+				{ID: "call_2", Name: "notify_self", Arguments: json.RawMessage(`{"text": "Second"}`)},
+			}}, nil
+		case last.Role == model.RoleUser && last.Content == "replace both":
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{
+				{ID: "call_3", Name: "notify_self", Arguments: json.RawMessage(`{"text": "Only one"}`)},
+			}}, nil
+		}
+		return model.CompletionResponse{Content: "Please approve."}, nil
+	}}
+	a := New(client, st, opts)
+
+	send(t, a, 1, "notify twice")
+	pending := st.PendingActions(1)
+	if len(pending) != 2 {
+		t.Fatalf("got %d actions, want 2", len(pending))
+	}
+	if pending[0].State != store.PendingProposed || pending[1].State != store.PendingProposed {
+		t.Fatalf("same-turn states = (%q, %q), want both proposed", pending[0].State, pending[1].State)
+	}
+	if len(cards.shown) != 2 {
+		t.Errorf("cards shown = %d, want 2", len(cards.shown))
+	}
+
+	send(t, a, 1, "replace both")
+	pending = st.PendingActions(1)
+	if len(pending) != 3 {
+		t.Fatalf("got %d actions after replacement, want 3", len(pending))
+	}
+	if pending[0].State != store.PendingSuperseded || pending[1].State != store.PendingSuperseded || pending[2].State != store.PendingProposed {
+		t.Errorf("states after next-turn replacement = (%q, %q, %q), want (superseded, superseded, proposed)",
+			pending[0].State, pending[1].State, pending[2].State)
+	}
+	if sends != 0 {
+		t.Errorf("tool ran %d times without approval, want 0", sends)
 	}
 }
 

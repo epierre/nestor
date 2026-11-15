@@ -355,3 +355,57 @@ func TestUnnotifiedOutcomesPerUserUntilMarked(t *testing.T) {
 		t.Errorf("B marking A's outcome: err = %v, want ErrActionNotFound", err)
 	}
 }
+
+func TestProposedActionsScopedAndUnexpired(t *testing.T) {
+	st, _, a, b, ctxA, ctxB := twoScoped(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	mk := func(ctx context.Context, user identity.UserID, id string, created, expires time.Time) {
+		t.Helper()
+		err := st.ProposeAction(ctx, user, store.PendingAction{
+			ID:        id,
+			ToolName:  "notify_self",
+			ArgsJSON:  json.RawMessage(`{"text": "` + id + `"}`),
+			ArgsHash:  "hash-" + id,
+			Preview:   "Notify yourself: " + id,
+			State:     store.PendingProposed,
+			CreatedAt: created,
+			ExpiresAt: expires,
+		})
+		if err != nil {
+			t.Fatalf("ProposeAction %s: %v", id, err)
+		}
+	}
+
+	mk(ctxA, a, "old-a", now.Add(-2*time.Minute), now.Add(time.Hour))
+	mk(ctxA, a, "turn2-a1", now.Add(-time.Minute), now.Add(time.Hour))
+	mk(ctxA, a, "turn2-a2", now, now.Add(time.Hour))
+	mk(ctxB, b, "live-b", now, now.Add(time.Hour))
+
+	// Superseding with turn2-a1 kept leaves both turn2 actions proposed and supersedes old-a.
+	n, err := st.SupersedePending(ctxA, a, "notify_self", "turn2-a2", "turn2-a1")
+	if err != nil {
+		t.Fatalf("SupersedePending: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("superseded %d actions, want 1 (only old-a)", n)
+	}
+
+	// An expired row still in state proposed must not be returned by ProposedActions.
+	mk(ctxA, a, "expired-a", now.Add(-2*time.Hour), now.Add(-time.Second))
+
+	gotA, err := st.ProposedActions(ctxA, a, now)
+	if err != nil {
+		t.Fatalf("ProposedActions A: %v", err)
+	}
+	if len(gotA) != 2 || gotA[0].ID != "turn2-a1" || gotA[1].ID != "turn2-a2" {
+		t.Errorf("A's proposed actions = %+v, want [turn2-a1 turn2-a2]", gotA)
+	}
+
+	gotB, err := st.ProposedActions(ctxB, b, now)
+	if err != nil {
+		t.Fatalf("ProposedActions B: %v", err)
+	}
+	if len(gotB) != 1 || gotB[0].ID != "live-b" {
+		t.Errorf("B's proposed actions = %+v, want [live-b]", gotB)
+	}
+}

@@ -371,19 +371,50 @@ func (s *Store) GetPendingAction(ctx context.Context, user identity.UserID, id s
 }
 
 // SupersedePending implements store.Store.
-func (s *Store) SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error) {
+func (s *Store) SupersedePending(ctx context.Context, user identity.UserID, tool, byID string, keepIDs ...string) (int64, error) {
 	if err := store.RequireUser(ctx, user); err != nil {
 		return 0, err
 	}
+	exclude := make([]string, 0, 1+len(keepIDs))
+	exclude = append(exclude, byID)
+	exclude = append(exclude, keepIDs...)
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE pending_actions
 		SET state = 'superseded', superseded_by = $3
-		WHERE user_id = $1 AND tool_name = $2 AND state = 'proposed' AND id <> $3`,
-		user, tool, keepID)
+		WHERE user_id = $1 AND tool_name = $2 AND state = 'proposed' AND NOT (id = ANY($4))`,
+		user, tool, byID, exclude)
 	if err != nil {
 		return 0, fmt.Errorf("supersede pending actions: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// ProposedActions implements store.Store.
+func (s *Store) ProposedActions(ctx context.Context, user identity.UserID, now time.Time) ([]store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+pendingColumns+`
+		FROM pending_actions
+		WHERE user_id = $1 AND state = 'proposed' AND expires_at > $2
+		ORDER BY created_at, id`, user, now)
+	if err != nil {
+		return nil, fmt.Errorf("list proposed actions: %w", err)
+	}
+	defer rows.Close()
+	var found []store.PendingAction
+	for rows.Next() {
+		action, err := scanPending(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan proposed action: %w", err)
+		}
+		found = append(found, action)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list proposed actions: %w", err)
+	}
+	return found, nil
 }
 
 // MarkCardSent implements store.Store. A chatID of 0 records no chat.

@@ -36,7 +36,7 @@ The system MUST treat cancelling a reminder as a critical action, carried out on
 - **THEN** the reminder is cancelled and is never delivered
 
 ### Requirement: Reminders are user-scoped in delivery
-The scheduler MUST fetch each user's due reminders with that user in context, and MUST NOT deliver a reminder to a chat other than the one it was created in.
+The scheduler MUST list active users from the identity directory rather than querying reminders across users, MUST fetch each active user's due reminders with that user in context, and MUST NOT deliver a reminder to a chat other than the one it was created in.
 
 #### Scenario: Two users due at once
 - **WHEN** two users each have a reminder due at the same tick

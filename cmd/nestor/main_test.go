@@ -65,11 +65,15 @@ func TestMissingBotTokenExitsNonZero(t *testing.T) {
 
 func TestAgentOptionsComeFromConfig(t *testing.T) {
 	reg := tools.NewRegistry()
-	got := agentOptions(config.Config{LLMModel: "strong", HistoryLimit: 12, MaxLoopIterations: 3}, reg)
+	loc, err := time.LoadLocation("Europe/Zurich")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	got := agentOptions(config.Config{LLMModel: "strong", HistoryLimit: 12, MaxLoopIterations: 3}, reg, loc)
 
-	want := agent.Options{Model: "strong", SystemPrompt: systemPrompt, HistoryLimit: 12, MaxIterations: 3, Tools: reg}
-	if got != want {
-		t.Errorf("got %+v, want %+v", got, want)
+	if got.Model != "strong" || got.SystemPrompt != systemPrompt || got.HistoryLimit != 12 ||
+		got.MaxIterations != 3 || got.Tools != reg || got.Location != loc {
+		t.Errorf("got %+v, want strong/12/3 with registry and Europe/Zurich", got)
 	}
 }
 
@@ -135,7 +139,7 @@ func TestDemoToolsReachTheModel(t *testing.T) {
 	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
 		return model.CompletionResponse{Content: "ok"}, nil
 	}}
-	a := agent.New(client, st, agentOptions(cfg, reg))
+	a := agent.New(client, st, agentOptions(cfg, reg, time.UTC))
 
 	if _, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "hello"); err != nil {
 		t.Fatalf("HandleMessage: %v", err)
