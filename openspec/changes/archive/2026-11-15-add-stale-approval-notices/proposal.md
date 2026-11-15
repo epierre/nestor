@@ -25,15 +25,14 @@ assume it ran.
 
 ## Capabilities
 
-- `action-approval` (modified: one requirement added)
+- `action-approval` (modified: one requirement updated, one requirement added)
 
 ## Constitution principles touched
 
 - 1 Approval enforced in code: no change. Notices never execute or approve anything.
-- 6 User-scoped by design: the sweep lists stale actions across users, as already approved. Each
-  notice and note is then written with that action's user ID in context. Chats are addresses
-  recorded per action; no user's data is combined with another's.
-- 5 Observable: each notice attempt is logged.
+- 6 User-scoped by design: each notice and conversation note is written with that action's user ID
+  in context. Chats are addresses recorded per action; no user's data is combined with another's.
+- 5 Observable: stale sweep counts and failed or unsendable notice attempts are logged.
 
 ## Non-goals
 
