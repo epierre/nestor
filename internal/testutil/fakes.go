@@ -4,6 +4,7 @@ package testutil
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -18,6 +19,11 @@ var (
 	_ channel.Channel   = (*FakeChannel)(nil)
 	_ model.ModelClient = (*FakeModel)(nil)
 	_ store.Store       = (*FakeStore)(nil)
+)
+
+var (
+	errBadTitle = errors.New("title must be 1 to 200 characters")
+	errBadDay   = errors.New("due day must be a real YYYY-MM-DD date")
 )
 
 // FakeChannel delivers Inbound as messages from User, then returns from Run.
@@ -125,6 +131,8 @@ type FakeStore struct {
 	modelCalls    []store.ModelCall
 	toolCalls     []store.ToolCall
 	actions       []store.PendingAction
+	tasks         []store.Task
+	reminders     []store.Reminder
 	identities    map[identityKey]identity.UserID
 }
 

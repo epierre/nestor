@@ -202,3 +202,11 @@ type refusingTool struct {
 func (r *refusingTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {
 	return Result{}, ErrCriticalRefusal
 }
+
+// PreviewFor forwards to the wrapped tool, so that the wrapper previews as the tool does.
+func (r *refusingTool) PreviewFor(ctx context.Context, args json.RawMessage) (string, error) {
+	if cp, ok := r.Tool.(ContextPreviewer); ok {
+		return cp.PreviewFor(ctx, args)
+	}
+	return r.Tool.Preview(args)
+}

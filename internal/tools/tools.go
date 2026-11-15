@@ -33,6 +33,13 @@ type Tool interface {
 	Execute(ctx context.Context, args json.RawMessage) (Result, error)
 }
 
+// ContextPreviewer is implemented by a tool whose approval preview needs the stored data that its
+// arguments refer to, such as the title of a task. It is called with the requesting user in the
+// context, so it can read only that user's data.
+type ContextPreviewer interface {
+	PreviewFor(ctx context.Context, args json.RawMessage) (string, error)
+}
+
 // MarkData wraps tool output in a marker stating it is untrusted data.
 func MarkData(content string) string {
 	return "[data]\n" + content

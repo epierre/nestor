@@ -52,6 +52,7 @@ func TestLoadValid(t *testing.T) {
 		MaxLoopIterations:  3,
 		ApprovalTTL:        24 * time.Hour,
 		ApprovalStaleAfter: 5 * time.Minute,
+		Timezone:           "Europe/Zurich",
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v, want %+v", cfg, want)
@@ -276,6 +277,41 @@ func TestLoadApprovalTTL(t *testing.T) {
 			}
 			if cfg.ApprovalTTL != tt.want {
 				t.Errorf("ApprovalTTL = %v, want %v", cfg.ApprovalTTL, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadTimezone(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{"default", "", "Europe/Zurich", false},
+		{"custom", "UTC", "UTC", false},
+		{"unknown zone", "Mars/Olympus", "", true},
+		{"not a zone name", "3pm", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			if tt.value != "" {
+				env["TIMEZONE"] = tt.value
+			}
+			cfg, err := load(env)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "TIMEZONE") {
+					t.Fatalf("err = %v, want one naming TIMEZONE", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Timezone != tt.want {
+				t.Errorf("Timezone = %q, want %q", cfg.Timezone, tt.want)
 			}
 		})
 	}

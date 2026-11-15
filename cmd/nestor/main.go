@@ -10,6 +10,9 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
+	// The runtime image has no zoneinfo files, so the time zone database is compiled in.
+	_ "time/tzdata"
 
 	"github.com/epierre/nestor/internal/agent"
 	"github.com/epierre/nestor/internal/approval"
@@ -19,7 +22,10 @@ import (
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/obs"
+	"github.com/epierre/nestor/internal/reminders"
+	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/store/postgres"
+	"github.com/epierre/nestor/internal/tasks"
 	"github.com/epierre/nestor/internal/tools"
 )
 
@@ -59,9 +65,14 @@ func run() error {
 	// Stale approvals are failed at startup and then every stale-after interval, so none stays
 	// approved for longer than about two intervals. The owner is told through the bot.
 	go approval.RunSweeps(ctx, st, bot, cfg.ApprovalStaleAfter, cfg.ApprovalStaleAfter)
-	registry := toolRegistry(cfg.EnableDemoTools, bot)
+	loc, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		return fmt.Errorf("load timezone: %w", err)
+	}
+	registry := toolRegistry(cfg.EnableDemoTools, bot, st, loc)
 	gate := approval.New(st, registry, cfg.ApprovalTTL)
 	bot.SetDecider(gate)
+	go reminders.Run(ctx, st, bot, reminderTick)
 	opts := agentOptions(cfg, registry)
 	opts.Approvals = gate
 	opts.Cards = bot
@@ -79,16 +90,24 @@ type chatNotifier interface {
 	Notify(ctx context.Context, chatID int64, text string) error
 }
 
-// toolRegistry returns the tools the agent may call. The demo tools are registered only when
-// enabled; the registry is empty otherwise.
-func toolRegistry(enableDemo bool, notifier chatNotifier) *tools.Registry {
+// reminderTick is how often due reminders are looked for.
+const reminderTick = 30 * time.Second
+
+// toolRegistry returns the tools the agent may call: the task and reminder tools always, and the
+// demo tools when enabled.
+func toolRegistry(enableDemo bool, notifier chatNotifier, st store.Store, loc *time.Location) *tools.Registry {
 	reg := tools.NewRegistry()
-	if !enableDemo {
-		return reg
+	// Each name is registered once, so registration cannot fail.
+	for _, tool := range tasks.Tools(st) {
+		_ = reg.Register(tool)
 	}
-	// Registering fresh names into an empty registry cannot fail.
-	_ = reg.Register(tools.NewCurrentTimeTool())
-	_ = reg.Register(tools.NewNotifySelfTool(notifySelf(notifier)))
+	for _, tool := range reminders.Tools(st, loc, time.Now) {
+		_ = reg.Register(tool)
+	}
+	if enableDemo {
+		_ = reg.Register(tools.NewCurrentTimeTool())
+		_ = reg.Register(tools.NewNotifySelfTool(notifySelf(notifier)))
+	}
 	return reg
 }
 
@@ -104,19 +123,15 @@ func notifySelf(notifier chatNotifier) tools.MessageSender {
 	}
 }
 
-// agentOptions turns the configuration into agent options. The registry is offered to the model
-// only when the demo tools are enabled, so that the default configuration keeps the agent tool-free.
+// agentOptions turns the configuration into agent options, offering the model the registry.
 func agentOptions(cfg config.Config, reg *tools.Registry) agent.Options {
-	opts := agent.Options{
+	return agent.Options{
 		Model:         cfg.LLMModel,
 		SystemPrompt:  systemPrompt,
 		HistoryLimit:  cfg.HistoryLimit,
 		MaxIterations: cfg.MaxLoopIterations,
+		Tools:         reg,
 	}
-	if cfg.EnableDemoTools {
-		opts.Tools = reg
-	}
-	return opts
 }
 
 func allowedIdentities(users []config.TelegramUser) []postgres.AllowedIdentity {

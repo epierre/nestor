@@ -597,3 +597,34 @@ func TestFailedNoticeStaysUnnotified(t *testing.T) {
 		t.Errorf("unnotified outcomes %+v, want the failed notice kept for the next message", waiting)
 	}
 }
+
+// storedTitleTool is critical. Its generic preview names only the arguments, and its context
+// preview names the stored title the arguments refer to.
+type storedTitleTool struct{}
+
+func (storedTitleTool) Name() string            { return "stored_title" }
+func (storedTitleTool) Description() string     { return "Deletes a titled thing." }
+func (storedTitleTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (storedTitleTool) Risk() tools.Risk        { return tools.RiskCritical }
+func (storedTitleTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
+	return tools.Result{Content: "gone"}, nil
+}
+func (storedTitleTool) Preview(json.RawMessage) (string, error) { return "Delete item 7", nil }
+func (storedTitleTool) PreviewFor(ctx context.Context, _ json.RawMessage) (string, error) {
+	if _, err := identity.UserFrom(ctx); err != nil {
+		return "", err
+	}
+	return "Delete: Renew passport", nil
+}
+
+func TestProposalPreviewUsesStoredData(t *testing.T) {
+	h := newHarness(t)
+	ctx := identity.WithUser(context.Background(), testUser)
+	action, err := h.gate.Propose(ctx, testUser, storedTitleTool{}, json.RawMessage(`{"id": 7}`))
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if action.Preview != "Delete: Renew passport" {
+		t.Errorf("preview %q, want the stored title from PreviewFor", action.Preview)
+	}
+}

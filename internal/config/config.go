@@ -15,6 +15,7 @@ const (
 	defaultHistoryLimit       = 30
 	defaultMaxLoopIterations  = 8
 	defaultApprovalTTL        = 24 * time.Hour
+	defaultTimezone           = "Europe/Zurich"
 	defaultApprovalStaleAfter = 5 * time.Minute
 )
 
@@ -36,6 +37,8 @@ type Config struct {
 	HistoryLimit         int
 	MaxLoopIterations    int
 	EnableDemoTools      bool
+	// Timezone is the IANA zone in which the owner's reminder and task times are read and shown.
+	Timezone string
 	// ApprovalTTL is how long a proposed action waits for its user's decision.
 	ApprovalTTL time.Duration
 	// ApprovalStaleAfter is how long an action may sit approved before it is failed as outcome
@@ -105,6 +108,13 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if cfg.LLMModel == "" {
 		cfg.LLMModel = defaultLLMModel
+	}
+	cfg.Timezone = get("TIMEZONE")
+	if cfg.Timezone == "" {
+		cfg.Timezone = defaultTimezone
+	}
+	if _, err := time.LoadLocation(cfg.Timezone); err != nil {
+		errs = append(errs, fmt.Errorf("TIMEZONE must be an IANA zone name such as %s", defaultTimezone))
 	}
 	if cfg.LLMBaseURL != "" && !isHTTPURL(cfg.LLMBaseURL) {
 		errs = append(errs, errors.New("LLM_BASE_URL must be an http or https URL"))
