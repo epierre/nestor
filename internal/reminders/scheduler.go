@@ -17,7 +17,7 @@ type Notifier interface {
 
 // DueStore is the part of the store the scheduler uses.
 type DueStore interface {
-	UsersWithDueReminders(ctx context.Context, now time.Time) ([]identity.UserID, error)
+	ListActiveUsers(ctx context.Context) ([]identity.UserID, error)
 	DueReminders(ctx context.Context, user identity.UserID, now time.Time) ([]store.Reminder, error)
 	MarkReminderDelivered(ctx context.Context, user identity.UserID, id int64, at time.Time) (bool, error)
 }
@@ -38,13 +38,14 @@ func Run(ctx context.Context, st DueStore, n Notifier, every time.Duration) {
 	}
 }
 
-// deliverDue sends every reminder that is due by now, each to the chat it was created in. A
-// reminder is marked delivered only after its message was sent, so a failed send is tried again
-// on the next tick. Each user's reminders are read with that user in context.
+// deliverDue sends every active user's due reminder to the chat it was created in. A reminder is
+// marked delivered only after its message was sent, so a failed send is tried again on the next
+// tick. Active users come from the identity directory, and each user's reminders are read with
+// that user in context.
 func deliverDue(ctx context.Context, st DueStore, n Notifier, now time.Time) error {
-	users, err := st.UsersWithDueReminders(ctx, now)
+	users, err := st.ListActiveUsers(ctx)
 	if err != nil {
-		return fmt.Errorf("list users with due reminders: %w", err)
+		return fmt.Errorf("list active users for reminders: %w", err)
 	}
 	for _, user := range users {
 		owner := identity.WithUser(ctx, user)

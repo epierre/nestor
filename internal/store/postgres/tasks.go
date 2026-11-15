@@ -230,8 +230,3 @@ func (s *Store) MarkReminderDelivered(ctx context.Context, user identity.UserID,
 	}
 	return tag.RowsAffected() == 1, nil
 }
-
-// UsersWithDueReminders delegates to ListActiveUsers until reminders.DueStore switches in task 2.2.
-func (s *Store) UsersWithDueReminders(ctx context.Context, _ time.Time) ([]identity.UserID, error) {
-	return s.ListActiveUsers(ctx)
-}

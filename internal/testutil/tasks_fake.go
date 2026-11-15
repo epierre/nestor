@@ -210,19 +210,6 @@ func (s *FakeStore) MarkReminderDelivered(ctx context.Context, user identity.Use
 	return true, nil
 }
 
-// UsersWithDueReminders implements store.Store.
-func (s *FakeStore) UsersWithDueReminders(_ context.Context, now time.Time) ([]identity.UserID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var users []identity.UserID
-	for _, r := range s.reminders {
-		if r.DeliveredAt == nil && r.CancelledAt == nil && !r.DueAt.After(now) && !slices.Contains(users, r.UserID) {
-			users = append(users, r.UserID)
-		}
-	}
-	return users, nil
-}
-
 func (s *FakeStore) taskIndex(user identity.UserID, id int64) int {
 	for i, t := range s.tasks {
 		if t.ID == id && t.UserID == user {

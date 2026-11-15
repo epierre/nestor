@@ -118,3 +118,67 @@ func TestTwoUsersDueAtOnceGetOnlyTheirOwn(t *testing.T) {
 		}
 	}
 }
+
+type spyDueStore struct {
+	*testutil.FakeStore
+	listedActive bool
+	dueCalls     []identity.UserID
+}
+
+func (s *spyDueStore) ListActiveUsers(ctx context.Context) ([]identity.UserID, error) {
+	s.listedActive = true
+	return s.FakeStore.ListActiveUsers(ctx)
+}
+
+func (s *spyDueStore) DueReminders(ctx context.Context, user identity.UserID, at time.Time) ([]store.Reminder, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	s.dueCalls = append(s.dueCalls, user)
+	return s.FakeStore.DueReminders(ctx, user, at)
+}
+
+func TestTwoUsersDueAtOnceScopedPerUser(t *testing.T) {
+	st := testutil.NewFakeStore()
+	addDue(t, st, owner, "owner's reminder", ownerChat)
+	addDue(t, st, other, "other's reminder", otherChat)
+	spy := &spyDueStore{FakeStore: st}
+	n := &recordingNotifier{}
+
+	if err := deliverDue(context.Background(), spy, n, now); err != nil {
+		t.Fatalf("deliverDue: %v", err)
+	}
+	if !spy.listedActive {
+		t.Error("deliverDue did not call ListActiveUsers")
+	}
+	if len(spy.dueCalls) != 2 || spy.dueCalls[0] != owner || spy.dueCalls[1] != other {
+		t.Errorf("DueReminders called for %v, want [%d %d]", spy.dueCalls, owner, other)
+	}
+	want := []notice{
+		{chat: ownerChat, text: "Reminder: owner's reminder"},
+		{chat: otherChat, text: "Reminder: other's reminder"},
+	}
+	if len(n.sent) != len(want) || n.sent[0] != want[0] || n.sent[1] != want[1] {
+		t.Errorf("sent %+v, want %+v", n.sent, want)
+	}
+}
+
+func TestDisabledUserReminderNotDelivered(t *testing.T) {
+	st := testutil.NewFakeStore()
+	st.AddIdentity("telegram", "100", owner)
+	st.AddIdentity("telegram", "200", other)
+	addDue(t, st, owner, "disabled reminder", ownerChat)
+	addDue(t, st, other, "active reminder", otherChat)
+	st.DisableIdentity("telegram", "100")
+	n := &recordingNotifier{}
+
+	if err := deliverDue(context.Background(), st, n, now); err != nil {
+		t.Fatalf("deliverDue: %v", err)
+	}
+	if len(n.sent) != 1 || n.sent[0] != (notice{chat: otherChat, text: "Reminder: active reminder"}) {
+		t.Fatalf("sent %+v, want only active user's reminder", n.sent)
+	}
+	if due, _ := st.DueReminders(identity.WithUser(context.Background(), owner), owner, now); len(due) != 1 {
+		t.Errorf("disabled user's reminder %+v, want kept intact and undelivered", due)
+	}
+}
