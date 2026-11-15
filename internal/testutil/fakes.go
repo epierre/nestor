@@ -443,7 +443,7 @@ func (s *FakeStore) TamperPendingAction(id string, args json.RawMessage) {
 }
 
 // SupersedePending implements store.Store.
-func (s *FakeStore) SupersedePending(ctx context.Context, user identity.UserID, tool, keepID string) (int64, error) {
+func (s *FakeStore) SupersedePending(ctx context.Context, user identity.UserID, tool, byID string, keepIDs ...string) (int64, error) {
 	if err := store.RequireUser(ctx, user); err != nil {
 		return 0, err
 	}
@@ -452,13 +452,42 @@ func (s *FakeStore) SupersedePending(ctx context.Context, user identity.UserID, 
 	var n int64
 	for i := range s.actions {
 		a := &s.actions[i]
-		if a.UserID == user && a.ToolName == tool && a.State == store.PendingProposed && a.ID != keepID {
+		if a.UserID == user && a.ToolName == tool && a.State == store.PendingProposed && a.ID != byID && !slices.Contains(keepIDs, a.ID) {
 			a.State = store.PendingSuperseded
-			a.SupersededBy = keepID
+			a.SupersededBy = byID
 			n++
 		}
 	}
 	return n, nil
+}
+
+// ProposedActions implements store.Store.
+func (s *FakeStore) ProposedActions(ctx context.Context, user identity.UserID, now time.Time) ([]store.PendingAction, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []store.PendingAction
+	for _, a := range s.actions {
+		if a.UserID == user && a.State == store.PendingProposed && a.ExpiresAt.After(now) {
+			found = append(found, a)
+		}
+	}
+	slices.SortStableFunc(found, func(a, b store.PendingAction) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		switch {
+		case a.ID < b.ID:
+			return -1
+		case a.ID > b.ID:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return found, nil
 }
 
 // MarkCardSent implements store.Store.

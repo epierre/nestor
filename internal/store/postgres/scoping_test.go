@@ -79,7 +79,11 @@ func TestUnscopedCallReturnsError(t *testing.T) {
 				return st.MarkOutcomeNoticed(ctx, user, "abc", now)
 			}},
 			{"SupersedePending", func(ctx context.Context) error {
-				_, err := st.SupersedePending(ctx, user, "notify_self", "abc")
+				_, err := st.SupersedePending(ctx, user, "notify_self", "abc", "def")
+				return err
+			}},
+			{"ProposedActions", func(ctx context.Context) error {
+				_, err := st.ProposedActions(ctx, user, now)
 				return err
 			}},
 			{"MarkCardSent", func(ctx context.Context) error {
