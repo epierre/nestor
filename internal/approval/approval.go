@@ -92,7 +92,7 @@ func (g *Gate) Propose(ctx context.Context, user identity.UserID, tool tools.Too
 	if tool.Risk() != tools.RiskCritical {
 		return store.PendingAction{}, ErrNotCritical
 	}
-	preview, err := tool.Preview(args)
+	preview, err := previewFor(ctx, tool, args)
 	if err != nil {
 		return store.PendingAction{}, fmt.Errorf("preview %s: %w", tool.Name(), err)
 	}
@@ -121,6 +121,15 @@ func (g *Gate) Propose(ctx context.Context, user identity.UserID, tool tools.Too
 	}
 	action.UserID = user
 	return action, nil
+}
+
+// previewFor returns the card text for a proposal. A tool that needs stored data for its preview gets
+// the user's context, so that it reads only that user's data.
+func previewFor(ctx context.Context, tool tools.Tool, args json.RawMessage) (string, error) {
+	if cp, ok := tool.(tools.ContextPreviewer); ok {
+		return cp.PreviewFor(ctx, args)
+	}
+	return tool.Preview(args)
 }
 
 // Decide applies decision to the user's pending action. Approval runs the tool at most once, with
