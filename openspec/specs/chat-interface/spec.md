@@ -7,7 +7,7 @@ everyone else out.
 ## Requirements
 
 ### Requirement: Allowlisted access
-The system SHALL process messages only from Telegram identities on the configured allowlist and SHALL ignore messages from any other sender.
+The system SHALL process inbound messages and run background outbound deliveries only for identities active on the configured allowlist, and SHALL ignore messages from any other sender.
 
 #### Scenario: Message from an allowlisted user
 - **WHEN** an allowlisted user sends "hello" to the bot
@@ -20,6 +20,10 @@ The system SHALL process messages only from Telegram identities on the configure
 #### Scenario: Identity removed from the allowlist
 - **WHEN** an identity is removed from the allowlist and the process restarts, then that identity sends a message
 - **THEN** the message is ignored and the user's stored data is kept
+
+#### Scenario: Disabled identity receives no background deliveries
+- **WHEN** a user has a due reminder or stalled approval, their identity is removed from the allowlist and synced, and background sweeps run
+- **THEN** no reminder or outcome notice is sent to that user's chat and their stored rows remain intact
 
 ### Requirement: Identity resolution at the boundary
 The system SHALL resolve each incoming Telegram sender identity to an internal user ID in the channel, MUST NOT pass platform user identities to the agent, and MAY attach an opaque chat routing address (`channel.WithChat`) to the request context solely so outbound cards, reminders and outcome notices return to the originating chat.

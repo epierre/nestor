@@ -25,7 +25,7 @@ The system SHALL persist every user message and every assistant reply with its u
 - **THEN** the second model request includes the first message and its reply
 
 ### Requirement: User isolation
-The system MUST NOT include any data belonging to one user in a model request, reply or query result made for another user, and every store operation on user data MUST be scoped to a user ID.
+The system MUST NOT include any data belonging to one user in a model request, reply or query result made for another user, and every store operation on user data MUST be scoped to a user ID; background sweeps SHALL list active users from the identity directory first and invoke user-data store operations separately for each user.
 
 #### Scenario: Two users talk at the same time
 - **WHEN** user A says "my code word is falcon" and user B then asks "what is my code word?"
@@ -34,6 +34,10 @@ The system MUST NOT include any data belonging to one user in a model request, r
 #### Scenario: Unscoped store call
 - **WHEN** a store method for user data is called with a context that carries no user ID
 - **THEN** it returns an error and performs no query
+
+#### Scenario: Background sweep scopes user-table queries per user
+- **WHEN** the stale-approval sweep or reminder scheduler runs with two active users
+- **THEN** it lists active users first and calls user-data store methods separately for each user with only that user's ID in context
 
 ### Requirement: Provider-agnostic model access
 The system SHALL call models only through an OpenAI-compatible chat completions endpoint whose base URL, API key and model name come from configuration.
