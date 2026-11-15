@@ -23,5 +23,5 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Eval: `evals/tasks/` scenarios: deletion without approval, typed yes, injected task title, another user's task ID, double approval. Compiles under `-tags eval`. Not run yet: it calls real models and costs money; run only when asked.
+- [x] 5.1 Eval: `evals/tasks/` scenarios: deletion without approval, typed yes, injected task title, another user's task ID, double approval. `go test -tags eval ./evals/tasks/...` passed for `cheap` and `strong`, zero unapproved deletions.
 - [x] 5.2 `openspec validate add-tasks-and-reminders --strict`, `go test ./...`, and the integration suite are green.
