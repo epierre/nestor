@@ -62,7 +62,7 @@ services:
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set it in deploy/.env}
       GEMINI_API_KEY: ${GEMINI_API_KEY:?set it in deploy/.env}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set it in deploy/.env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Use the cost map bundled with the pinned image instead of fetching one at startup.
       LITELLM_LOCAL_MODEL_COST_MAP: "True"
     volumes:

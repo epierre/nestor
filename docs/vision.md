@@ -49,8 +49,8 @@ Learning about the owner
 - As the owner, I can see what the assistant has learned about me, correct it, and make it forget things.
 
 Control and trust
-- As the owner, I approve, edit or reject every critical action (sending email, accepting
-  invitations, deleting data) before it happens.
+- As the owner, I approve, request changes in chat, or reject every critical action (sending
+  email, accepting invitations, deleting data) before it happens.
 - As the owner, I can see what the assistant did, when, and what it cost.
 - As the owner, I can switch which AI models are used, based on cost and availability,
   without code changes.
@@ -75,17 +75,17 @@ Control and trust
 
 ## Roadmap (one OpenSpec change each, in order)
 
-1. `add-chat-foundation`: Telegram chat, agent loop, one model via an OpenAI-compatible proxy, conversation persistence, call logging.
-2. `add-tool-approval-gate`: tool registry with risk levels, pending actions, approve/edit/reject flow.
-3. `add-tasks-and-reminders`: first real tools (tasks, reminders) plus the scheduler.
-4. `add-model-routing`: model tiers, fallbacks, cost tracking and budget alerts.
-5. `add-calendar`: read calendar, propose event changes through the approval gate.
-6. `add-email`: read and summarise mail, draft replies, send via approval.
-7. `add-owner-memory`: profile facts, episodic recall, review/correct/forget commands.
-8. `add-proactive-briefings`: morning summary and important-mail alerts.
-9. `add-mcp-servers`: third-party MCP tools with configured risk levels, per-user enablement and credentials, pinned descriptions.
-10. `add-skills`: reviewed, pinned skills loaded on demand, optional sandboxed scripts.
-11. (Later, optional) `add-household-users`: onboarding further users, per-user budgets.
+1. `add-chat-foundation` (done): Telegram chat, agent loop, one model via an OpenAI-compatible proxy, conversation persistence, call logging.
+2. `add-tool-approval-gate` (done, with `add-stale-approval-notices` and `refine-context-and-approvals`): tool registry with risk levels, pending actions, approve/reject cards, conversational edits, and stale-approval notices.
+3. `add-tasks-and-reminders` (done): first real tools (tasks, reminders) plus the scheduler.
+4. `add-model-routing` (planned): model tiers, fallbacks, cost tracking and budget alerts.
+5. `add-calendar` (planned): read calendar, propose event changes through the approval gate.
+6. `add-email` (planned): read and summarise mail, draft replies, send via approval.
+7. `add-owner-memory` (planned): profile facts, episodic recall, review/correct/forget commands.
+8. `add-proactive-briefings` (planned): morning summary and important-mail alerts.
+9. `add-mcp-servers` (specified): third-party MCP tools with configured risk levels, per-user enablement and credentials, pinned descriptions.
+10. `add-skills` (specified): reviewed, pinned skills loaded on demand, optional sandboxed scripts.
+11. (Later, optional) `add-household-users` (planned): onboarding further users, per-user budgets.
 
 Changes 9 and 10 depend only on change 2 and can be pulled earlier whenever useful.
 
@@ -93,7 +93,7 @@ Changes 9 and 10 depend only on change 2 and can be pulled earlier whenever usef
 
 - Mail: chosen per user. The owner uses Proton Mail; other household users use Gmail.
 - Calendar: Google Calendar for all users.
-- Models: Gemini Flash for the cheap tier, Claude Opus 5.5 for the strong tier.
+- Models: Gemini Flash for the cheap tier, Gemini 4 Hydrogen for the strong tier (swappable via LiteLLM config).
 
 ## Open questions
 

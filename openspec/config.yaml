@@ -15,20 +15,21 @@ context: |
   - No local chat models. LLM calls go out to cloud providers through a LiteLLM proxy
     container exposing an OpenAI-compatible API. The agent talks ONLY to that proxy.
   - Models: LiteLLM aliases `cheap` = Gemini Flash (most turns, triage, summaries) and
-    `strong` = Claude Opus 5.5 (planning, drafting outgoing email, hard reasoning).
+    `strong` = Gemini 4 Hydrogen (planning, drafting outgoing email, hard reasoning; swappable
+    in `deploy/litellm.yaml`, e.g. to Claude Opus 5.5).
     Code refers to aliases only, never to provider model IDs.
-  - Mail: the provider is a per-user setting behind one `mail.Provider` interface. Supported
-    providers: Proton Mail (via Proton Mail Bridge on the host, IMAP/SMTP with a Bridge
-    password, internal Docker network only, one Bridge instance per Proton account) and Gmail
-    (IMAP/SMTP with XOAUTH2 using the user's Google OAuth token). Both go through a single
-    IMAP/SMTP adapter with pluggable authentication; a Gmail API adapter is added only if
-    IMAP proves insufficient.
-  - Calendar: Google Calendar API over OAuth 2.0. One Google OAuth app for the host; each
-    user's refresh token stored per user, encrypted. Gmail users grant mail and calendar
-    scopes in the same consent.
+  - Mail (planned, `add-email`): the provider will be a per-user setting behind one
+    `mail.Provider` interface. Supported providers: Proton Mail (via Proton Mail Bridge on the
+    host, IMAP/SMTP with a Bridge password, internal Docker network only, one Bridge instance per
+    Proton account) and Gmail (IMAP/SMTP with XOAUTH2 using the user's Google OAuth token). Both
+    go through a single IMAP/SMTP adapter with pluggable authentication; a Gmail API adapter is
+    added only if IMAP proves insufficient.
+  - Calendar (planned, `add-calendar`): Google Calendar API over OAuth 2.0. One Google OAuth app
+    for the host; each user's refresh token stored per user, encrypted. Gmail users grant mail
+    and calendar scopes in the same consent.
   - Storage: PostgreSQL (with pgvector available for later memory work).
-  - Tools are exposed to the agent through a Go tool registry; external tools may be
-    MCP servers (official MCP Go SDK). Every tool declares a risk level.
+  - Tools are exposed to the agent through a Go tool registry; external tools (planned,
+    `add-mcp-servers`) may be MCP servers (official MCP Go SDK). Every tool declares a risk level.
   - User interface: Telegram bot (long polling, no inbound ports). Remote admin via Tailscale.
 
   Constitution (non-negotiable principles every change must respect)
@@ -59,9 +60,11 @@ context: |
   - Identity is resolved once, at the channel boundary, into a user ID carried in the request
     context. Code below the channel never sees platform identities (Telegram IDs etc.).
   - Every store method that reads or writes user data takes the user ID explicitly and filters
-    by it; there are no unscoped queries on user tables.
-  - Per-user secrets (OAuth tokens for mail/calendar) are stored encrypted per user; only
-    host-wide secrets (bot token, proxy key, encryption key) live in the environment.
+    by it (`ListActiveUsers` enumerates active user IDs for background sweeps); there are no
+    unscoped queries on user tables.
+  - Once per-user secrets (OAuth tokens for mail/calendar, MCP credentials) are introduced, they
+    are stored encrypted per user; only host-wide secrets (bot token, proxy key, encryption key)
+    live in the environment.
   - Context-aware functions (ctx first), structured logging with log/slog, errors wrapped
     with %w.
   - Tests: `go test ./...` must pass; table-driven tests; integration tests against a
