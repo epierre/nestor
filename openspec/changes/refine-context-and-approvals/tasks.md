@@ -5,7 +5,7 @@
 
 ## 2. Approval gate & tool validation invariants
 
-- [ ] 2.1 Add `approval.WithTurn(ctx)` in `internal/approval/approval.go` and pass the current turn's proposed IDs to `SupersedePending` so same-turn proposals stay `proposed` while cross-turn and standalone proposals supersede earlier ones (tests: `TestSameTurnProposalsStayProposed`, `TestNewProposalSupersedesEarlierOfSameTool` in `internal/approval/approval_test.go`)
+- [x] 2.1 Add `approval.WithTurn(ctx)` in `internal/approval/approval.go` and pass the current turn's proposed IDs to `SupersedePending` so same-turn proposals stay `proposed` while cross-turn and standalone proposals supersede earlier ones (tests: `TestSameTurnProposalsStayProposed`, `TestNewProposalSupersedesEarlierOfSameTool` in `internal/approval/approval_test.go`)
 - [ ] 2.2 Add non-blank `text` schema constraints (`minLength: 1`, `pattern: "\\S"`) to `NotifySelfTool.Schema()` in `internal/tools/demo.go` (test: `TestNotifySelfBlankTextFailsValidation` in `internal/tools/demo_test.go`)
 
 ## 3. Agent prompt context, data-marking, and entrypoint wiring

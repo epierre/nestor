@@ -436,6 +436,45 @@ func TestSupersedeLeavesOtherUsersActionsAlone(t *testing.T) {
 	}
 }
 
+func TestSameTurnProposalsStayProposed(t *testing.T) {
+	h := newHarness(t)
+	turn1 := WithTurn(identity.WithUser(context.Background(), testUser))
+	first, err := h.gate.Propose(turn1, testUser, h.tool, json.RawMessage(`{"text": "First"}`))
+	if err != nil {
+		t.Fatalf("first Propose: %v", err)
+	}
+	second, err := h.gate.Propose(turn1, testUser, h.tool, json.RawMessage(`{"text": "Second"}`))
+	if err != nil {
+		t.Fatalf("second Propose: %v", err)
+	}
+
+	if got := h.stored(t, testUser, first.ID).State; got != store.PendingProposed {
+		t.Errorf("first same-turn state %q, want proposed", got)
+	}
+	if got := h.stored(t, testUser, second.ID).State; got != store.PendingProposed {
+		t.Errorf("second same-turn state %q, want proposed", got)
+	}
+
+	// A replacement in a later turn supersedes both earlier proposals.
+	turn2 := WithTurn(identity.WithUser(context.Background(), testUser))
+	third, err := h.gate.Propose(turn2, testUser, h.tool, json.RawMessage(`{"text": "Replacement"}`))
+	if err != nil {
+		t.Fatalf("third Propose: %v", err)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		got := h.stored(t, testUser, id)
+		if got.State != store.PendingSuperseded || got.SupersededBy != third.ID {
+			t.Errorf("action %s state %q superseded_by %q, want superseded by %s", id, got.State, got.SupersededBy, third.ID)
+		}
+		if _, err := h.decide(testUser, id, Approve); !errors.Is(err, ErrNoPendingAction) {
+			t.Errorf("approving superseded %s: err = %v, want ErrNoPendingAction", id, err)
+		}
+	}
+	if got := h.stored(t, testUser, third.ID).State; got != store.PendingProposed {
+		t.Errorf("third state %q, want proposed", got)
+	}
+}
+
 func TestUnsentCardsAreRetriedUntilMarked(t *testing.T) {
 	h := newHarness(t)
 	action := h.propose(t, testUser)
