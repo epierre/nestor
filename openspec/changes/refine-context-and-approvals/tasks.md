@@ -11,7 +11,7 @@
 ## 3. Agent prompt context, data-marking, and entrypoint wiring
 
 - [x] 3.1 Add optional `Location *time.Location` and `Now func() time.Time` to `agent.Options` in `internal/agent/agent.go` and wire `loc` in `cmd/nestor/main.go` and `evals/tasks/tasks_eval_test.go` (tests: `TestClockAndTimezoneIncludedInSystemPrompt` in `internal/agent/agent_test.go`, `TestAgentOptionsComeFromConfig` in `cmd/nestor/main_test.go`)
-- [ ] 3.2 Mark `"pending approval <id>"` tool results with `tools.MarkData`, wrap `HandleMessage` in `approval.WithTurn`, reconstruct active `ProposedActions` as `assistant` tool calls + marked `tool` results in `Agent.prompt`, and extend `TestStructuralCriticalToolExecution` to scan `cmd/` as well as `internal/` in `internal/agent/agent.go` and `internal/agent/agent_test.go` (tests: `TestToolDispatch`, `TestFailedCardLeavesActionPending`, `TestEditSupersedesAndRequiresNewApproval`, `TestMultipleCriticalCallsInOneTurnStayProposed`, `TestStructuralCriticalToolExecution` in `internal/agent/agent_test.go`)
+- [x] 3.2 Mark `"pending approval <id>"` tool results with `tools.MarkData`, wrap `HandleMessage` in `approval.WithTurn`, reconstruct active `ProposedActions` as `assistant` tool calls + marked `tool` results in `Agent.prompt`, and extend `TestStructuralCriticalToolExecution` to scan `cmd/` as well as `internal/` in `internal/agent/agent.go` and `internal/agent/agent_test.go` (tests: `TestToolDispatch`, `TestFailedCardLeavesActionPending`, `TestEditSupersedesAndRequiresNewApproval`, `TestMultipleCriticalCallsInOneTurnStayProposed`, `TestStructuralCriticalToolExecution` in `internal/agent/agent_test.go`)
 
 ## 4. Verification
 
