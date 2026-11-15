@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/epierre/nestor/internal/agent"
 	"github.com/epierre/nestor/internal/channel"
@@ -62,9 +64,10 @@ func TestMissingBotTokenExitsNonZero(t *testing.T) {
 }
 
 func TestAgentOptionsComeFromConfig(t *testing.T) {
-	got := agentOptions(config.Config{LLMModel: "strong", HistoryLimit: 12, MaxLoopIterations: 3}, nil)
+	reg := tools.NewRegistry()
+	got := agentOptions(config.Config{LLMModel: "strong", HistoryLimit: 12, MaxLoopIterations: 3}, reg)
 
-	want := agent.Options{Model: "strong", SystemPrompt: systemPrompt, HistoryLimit: 12, MaxIterations: 3}
+	want := agent.Options{Model: "strong", SystemPrompt: systemPrompt, HistoryLimit: 12, MaxIterations: 3, Tools: reg}
 	if got != want {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
@@ -85,6 +88,19 @@ func TestAllowedIdentities(t *testing.T) {
 	}
 }
 
+func TestTaskAndReminderToolsAlwaysRegistered(t *testing.T) {
+	st := testutil.NewFakeStore()
+	reg := toolRegistry(false, &fakeNotifier{}, st, time.UTC)
+	var got []string
+	for _, def := range reg.Tools() {
+		got = append(got, def.Name)
+	}
+	want := []string{"task_add", "task_list", "task_complete", "task_delete", "reminder_add", "reminder_list", "reminder_cancel"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tools %v, want %v", got, want)
+	}
+}
+
 func TestDemoToolsOfferedOnlyWhenEnabled(t *testing.T) {
 	names := func(reg *tools.Registry) []string {
 		var got []string
@@ -94,8 +110,9 @@ func TestDemoToolsOfferedOnlyWhenEnabled(t *testing.T) {
 		return got
 	}
 
-	on := toolRegistry(true, &fakeNotifier{})
-	if got := names(on); !reflect.DeepEqual(got, []string{"current_time", "notify_self"}) {
+	st := testutil.NewFakeStore()
+	on := toolRegistry(true, &fakeNotifier{}, st, time.UTC)
+	if got := names(on); !slices.Contains(got, "current_time") || !slices.Contains(got, "notify_self") {
 		t.Errorf("enabled: tools %v, want current_time and notify_self", got)
 	}
 	notify, err := on.Lookup("notify_self")
@@ -106,18 +123,19 @@ func TestDemoToolsOfferedOnlyWhenEnabled(t *testing.T) {
 		t.Errorf("notify_self risk %v, want critical", notify.Risk())
 	}
 
-	if got := names(toolRegistry(false, &fakeNotifier{})); len(got) != 0 {
-		t.Errorf("disabled: tools %v, want none", got)
+	if got := names(toolRegistry(false, &fakeNotifier{}, st, time.UTC)); slices.Contains(got, "notify_self") || slices.Contains(got, "current_time") {
+		t.Errorf("disabled: tools %v, want no demo tools", got)
 	}
 }
 
 func TestDemoToolsReachTheModel(t *testing.T) {
 	cfg := config.Config{EnableDemoTools: true, LLMModel: "cheap", HistoryLimit: 5, MaxLoopIterations: 2}
-	reg := toolRegistry(true, &fakeNotifier{})
+	st := testutil.NewFakeStore()
+	reg := toolRegistry(true, &fakeNotifier{}, st, time.UTC)
 	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
 		return model.CompletionResponse{Content: "ok"}, nil
 	}}
-	a := agent.New(client, testutil.NewFakeStore(), agentOptions(cfg, reg))
+	a := agent.New(client, st, agentOptions(cfg, reg))
 
 	if _, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "hello"); err != nil {
 		t.Fatalf("HandleMessage: %v", err)
@@ -126,14 +144,14 @@ func TestDemoToolsReachTheModel(t *testing.T) {
 	for _, def := range client.Requests()[0].Tools {
 		offered = append(offered, def.Name)
 	}
-	if !reflect.DeepEqual(offered, []string{"current_time", "notify_self"}) {
-		t.Errorf("model was offered %v, want the two demo tools", offered)
+	if !slices.Contains(offered, "notify_self") || !slices.Contains(offered, "task_add") {
+		t.Errorf("model was offered %v, want the demo and task tools", offered)
 	}
 }
 
 func TestNotifySelfSendsToTheRequestChat(t *testing.T) {
 	notifier := &fakeNotifier{}
-	reg := toolRegistry(true, notifier)
+	reg := toolRegistry(true, notifier, testutil.NewFakeStore(), time.UTC)
 	tool, err := reg.Lookup("notify_self")
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)

@@ -25,6 +25,7 @@ services:
       ENABLE_DEMO_TOOLS: ${ENABLE_DEMO_TOOLS:-false}
       APPROVAL_TTL: ${APPROVAL_TTL:-}
       APPROVAL_STALE_AFTER: ${APPROVAL_STALE_AFTER:-}
+      TIMEZONE: ${TIMEZONE:-}
     networks:
       - default
       - database
