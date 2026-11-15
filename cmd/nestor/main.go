@@ -73,7 +73,7 @@ func run() error {
 	gate := approval.New(st, registry, cfg.ApprovalTTL)
 	bot.SetDecider(gate)
 	go reminders.Run(ctx, st, bot, reminderTick)
-	opts := agentOptions(cfg, registry)
+	opts := agentOptions(cfg, registry, loc)
 	opts.Approvals = gate
 	opts.Cards = bot
 	opts.Notices = bot
@@ -123,14 +123,16 @@ func notifySelf(notifier chatNotifier) tools.MessageSender {
 	}
 }
 
-// agentOptions turns the configuration into agent options, offering the model the registry.
-func agentOptions(cfg config.Config, reg *tools.Registry) agent.Options {
+// agentOptions turns the configuration into agent options, offering the model the registry and
+// local time zone.
+func agentOptions(cfg config.Config, reg *tools.Registry, loc *time.Location) agent.Options {
 	return agent.Options{
 		Model:         cfg.LLMModel,
 		SystemPrompt:  systemPrompt,
 		HistoryLimit:  cfg.HistoryLimit,
 		MaxIterations: cfg.MaxLoopIterations,
 		Tools:         reg,
+		Location:      loc,
 	}
 }
 

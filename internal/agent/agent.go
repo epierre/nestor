@@ -60,6 +60,12 @@ type Options struct {
 	// Notices delivers outcome-unknown notices that were not delivered when first due. Without it,
 	// they are not sent again.
 	Notices approval.Notifier
+	// Location adds the current local date, time and IANA zone name to the system prompt on each
+	// turn when set. Without it, SystemPrompt is sent unchanged.
+	Location *time.Location
+	// Now returns the current time for prompt timestamps and card/proposal checks. Without it,
+	// time.Now is used.
+	Now func() time.Time
 }
 
 // Agent runs the conversation loop for one message at a time.
@@ -298,7 +304,7 @@ func (a *Agent) showCard(ctx context.Context, user identity.UserID, action store
 		return
 	}
 	chatID, _ := channel.ChatFrom(ctx)
-	if err := a.store.MarkCardSent(ctx, user, action.ID, chatID, time.Now()); err != nil {
+	if err := a.store.MarkCardSent(ctx, user, action.ID, chatID, a.now()); err != nil {
 		slog.WarnContext(ctx, "approval card delivery not recorded", "action_id", action.ID, "error", err)
 	}
 }
@@ -310,7 +316,7 @@ func (a *Agent) resendCards(ctx context.Context, user identity.UserID) {
 	if a.opts.Cards == nil {
 		return
 	}
-	unsent, err := a.store.UnsentCards(ctx, user, time.Now())
+	unsent, err := a.store.UnsentCards(ctx, user, a.now())
 	if err != nil {
 		slog.WarnContext(ctx, "unsent approval cards not listed", "error", err)
 		return
@@ -336,9 +342,28 @@ func (a *Agent) resendOutcomeNotices(ctx context.Context, user identity.UserID) 
 	}
 }
 
+func (a *Agent) now() time.Time {
+	if a.opts.Now != nil {
+		return a.opts.Now()
+	}
+	return time.Now()
+}
+
+func (a *Agent) systemPrompt() string {
+	if a.opts.Location == nil {
+		return a.opts.SystemPrompt
+	}
+	local := a.now().In(a.opts.Location)
+	line := fmt.Sprintf("Current time: %s (%s).", local.Format("Monday, 2006-01-02 15:04 MST"), a.opts.Location.String())
+	if a.opts.SystemPrompt == "" {
+		return line
+	}
+	return a.opts.SystemPrompt + "\n" + line
+}
+
 func (a *Agent) prompt(history []store.Message) []model.Message {
 	messages := make([]model.Message, 0, len(history)+1)
-	messages = append(messages, model.Message{Role: model.RoleSystem, Content: a.opts.SystemPrompt})
+	messages = append(messages, model.Message{Role: model.RoleSystem, Content: a.systemPrompt()})
 	for _, m := range history {
 		messages = append(messages, model.Message{Role: m.Role, Content: m.Content})
 	}

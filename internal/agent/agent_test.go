@@ -104,6 +104,31 @@ func TestRepliesWithFakeModelOutput(t *testing.T) {
 	}
 }
 
+func TestClockAndTimezoneIncludedInSystemPrompt(t *testing.T) {
+	zurich, err := time.LoadLocation("Europe/Zurich")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	fixed := time.Date(2026, 11, 15, 17, 49, 0, 0, time.UTC)
+	opts := testOptions()
+	opts.Location = zurich
+	opts.Now = func() time.Time { return fixed }
+
+	client := numberedReplies()
+	a := New(client, testutil.NewFakeStore(), opts)
+	send(t, a, 1, "what day is tomorrow?")
+
+	sys := lastRequest(t, client).Messages[0]
+	if sys.Role != model.RoleSystem {
+		t.Fatalf("first message role = %q, want system", sys.Role)
+	}
+	for _, want := range []string{"be helpful", "Sunday", "2026-11-15", "18:49", "Europe/Zurich"} {
+		if !strings.Contains(sys.Content, want) {
+			t.Errorf("system prompt %q does not contain %q", sys.Content, want)
+		}
+	}
+}
+
 func TestHandleMessageWithoutUserMakesNoModelCall(t *testing.T) {
 	client := &testutil.FakeModel{}
 
