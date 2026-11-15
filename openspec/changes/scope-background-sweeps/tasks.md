@@ -11,4 +11,4 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Run `openspec validate --all --strict`, `gofmt -l .`, `go vet ./...`, `go test ./...`, and `go test -tags integration ./...` with zero errors. Test: full unit and PostgreSQL integration suites.
+- [x] 3.1 Run `openspec validate --all --strict`, `gofmt -l .`, `go vet ./...`, `go test ./...`, and `go test -tags integration ./...` with zero errors. Test: full unit and PostgreSQL integration suites.
