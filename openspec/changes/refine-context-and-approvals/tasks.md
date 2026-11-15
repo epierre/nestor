@@ -15,4 +15,4 @@
 
 ## 4. Verification
 
-- [ ] 4.1 Run `gofmt -l .`, `go vet ./...`, `go test -count=1 ./...`, `go test -count=1 -tags integration ./...`, and `openspec validate --all --strict` to verify all unit, integration, and spec checks pass (tests: full unit and Postgres integration suites)
+- [x] 4.1 Run `gofmt -l .`, `go vet ./...`, `go test -count=1 ./...`, `go test -count=1 -tags integration ./...`, and `openspec validate --all --strict` to verify all unit, integration, and spec checks pass (tests: full unit and Postgres integration suites)
