@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Edit by conversation
-The system SHALL keep a user's unexpired proposed actions from the active conversation in model context as assistant tool calls paired with tool-role results marked as data (without adding arguments or previews to system messages) so the user can request changes by replying in the chat; a replacement action proposed in a later turn SHALL mark open proposed actions of that tool from earlier turns superseded and require its own approval, whereas multiple critical calls of the same tool proposed within the same turn SHALL all remain proposed and each require its own approval.
+The system SHALL include a user's unexpired proposed actions from the active conversation in model context as assistant tool calls paired with data-marked tool results (never in system messages) so the user can request changes in chat; a replacement proposed in a later turn SHALL mark earlier turns' open proposals of that tool superseded, while multiple critical calls of the same tool in one turn SHALL all remain proposed.
 
 #### Scenario: User asks for a change
 - **WHEN** an action with text "Dentist at 3pm" is proposed and its user replies "make it 4pm" in a subsequent turn
