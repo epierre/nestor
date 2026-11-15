@@ -98,26 +98,31 @@ These restate the constitution as code-level checks. Reviews reject any diff tha
 - **Approval path.** A tool with risk `critical` is executed only from `internal/approval`, in
   response to an approval callback from the action's own user. No other code path calls
   `Execute` on a critical tool. Message text, model output and tool results can never approve.
-- **Risk from code/config.** A tool's risk level comes from its Go definition or reviewed
-  config (`mcp.yaml`), never from the model, a server annotation, a skill, or tool arguments.
-- **User scoping.** Every query on user data filters by user ID; store methods take the user ID
-  explicitly and error without one. Platform identities (Telegram IDs) never pass the channel
-  layer. Tools act only for the user in context, never for an ID in their arguments.
-- **Untrusted content.** Tool, MCP and skill-script output enters the conversation only as
-  tool-role messages. It is never concatenated into system or user messages.
+- **Risk from code/config.** A tool's risk level comes from its Go definition or (once
+  `add-mcp-servers` lands) reviewed config (`mcp.yaml`), never from the model, a server
+  annotation, a skill, or tool arguments.
+- **User scoping.** Every query on user data filters by user ID; store methods on user tables
+  take the user ID explicitly and error without one (`ListActiveUsers` enumerates active user IDs
+  for background sweeps). Platform identities (Telegram IDs) never pass the channel layer. Tools
+  act only for the user in context, never for an ID in their arguments.
+- **Untrusted content.** Tool (and, once implemented, MCP and skill-script) output enters the
+  conversation only as tool-role messages. It is never concatenated into system or user messages.
 - **Provider-agnostic.** No vendor SDK outside `internal/model`. Code refers to model aliases
   (`cheap`, `strong`), never to provider model IDs.
-- **Secrets.** No secrets in the repo, logs, call log, or test fixtures. Per-user credentials
-  are encrypted at rest. Use fake values like `test-token` in tests.
+- **Secrets.** No secrets in the repo, logs, call log, or test fixtures. When per-user
+  credentials are introduced (`add-calendar`, `add-email`, `add-mcp-servers`), they are encrypted
+  at rest. Use fake values like `test-token` in tests.
 
 ## Go conventions
 
-- Go latest stable, one module, `cmd/nestor` entrypoint, packages under `internal/`.
+- Go latest stable, one module, `cmd/nestor` entrypoint, packages under `internal/`, eval suites
+  under `evals/`.
 - Standard library first. Any new dependency is justified in the change's `design.md`.
 - `ctx context.Context` first in functions that do I/O; `log/slog` structured logging; wrap
   errors with `%w`; no panics outside `main`.
-- Interfaces at package boundaries (channel, model client, store, tool registry) with fakes
-  in `internal/testutil`.
+- Interfaces at package boundaries (channel, model client, store, tool registry), with
+  `FakeChannel`, `FakeModel`, and `FakeStore` in `internal/testutil` (tests wire a real
+  `tools.NewRegistry()`).
 - Table-driven tests. Integration tests seed **two users** and assert neither sees the other's data.
 
 ## Commands

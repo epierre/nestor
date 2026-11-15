@@ -8,10 +8,12 @@ It is named after the unflappable, discreet butler of the Tintin stories (and th
 counsellor of Greek myth). It is also a learning project: understanding how agents are built,
 hosted and evaluated matters as much as the end result.
 
-> **Status: early implementation.** The Compose stack starts, but Nestor cannot chat yet: it
-> only validates its configuration and waits. This repository mainly holds the product vision
-> and the OpenSpec changes for the first pieces of the system. Unless a section says otherwise,
-> everything below describes the intended design, not working software.
+> **Status: early implementation.** Telegram long-polling chat, the agent loop (with local
+> `TIMEZONE` clock context), PostgreSQL conversation persistence and model/tool call logging, the
+> tool registry, inline approval cards (with conversational edits and stale-approval notices), and
+> tasks and reminders (including a 30-second reminder scheduler) are implemented and running.
+> Model routing, calendar, email, owner memory, proactive briefings, MCP servers, and skills are
+> still planned — see the [Roadmap](#roadmap) below.
 
 ## What it will do
 
@@ -53,12 +55,16 @@ Telegram ──long poll──▶ channel ──▶ agent ──▶ model client
                                         └──▶ tool registry ──▶ approval gate
 ```
 
-- **Agent:** a single static Go binary (`cmd/nestor`), with packages under `internal/`.
-- **Models:** cloud providers only, reached through a LiteLLM proxy. Code uses the aliases
-  `cheap` (Gemini Flash) and `strong` (Claude Opus 5.5), never provider model IDs.
+- **Agent:** a single static Go binary ([`cmd/nestor`](cmd/nestor/main.go)), with packages under `internal/`.
+- **Models:** cloud providers only, reached through a LiteLLM proxy ([`deploy/litellm.yaml`](deploy/litellm.yaml)).
+  Code uses the aliases `cheap` (Gemini Flash) and `strong` (Gemini 4 Hydrogen; swappable in
+  LiteLLM config), never provider model IDs.
 - **Storage:** PostgreSQL, with pgvector available for later memory work.
 - **Tools:** a Go registry where every tool declares a risk level: `read`, `reversible` or
-  `critical`. Third-party tools can be added later as MCP servers.
+  `critical`. Built-in task (`task_add`, `task_list`, `task_complete`, `task_delete`) and
+  reminder (`reminder_add`, `reminder_list`, `reminder_cancel`) tools are always enabled; demo
+  tools (`current_time`, `notify_self`) are gated behind `ENABLE_DEMO_TOOLS`. Third-party tools
+  can be added later as MCP servers.
 - **Interface:** a Telegram bot using long polling, so there are no inbound ports. Remote
   admin goes through Tailscale.
 - **Host:** an Intel N100 mini PC running Docker Compose, with the whole stack under about
@@ -70,9 +76,9 @@ Each step is one OpenSpec change, delivered as a thin vertical slice that runs e
 
 | # | Change | Scope | Status |
 |---|--------|-------|--------|
-| 1 | [`add-chat-foundation`](openspec/changes/add-chat-foundation/) | Telegram chat, agent loop, persistence, call logging | In progress |
-| 2 | [`add-tool-approval-gate`](openspec/changes/add-tool-approval-gate/) | Tool registry, risk levels, approve/edit/reject flow | Specified |
-| 3 | `add-tasks-and-reminders` | First real tools plus the scheduler | Planned |
+| 1 | [`add-chat-foundation`](openspec/changes/archive/2026-11-14-add-chat-foundation/) | Telegram chat, agent loop, persistence, call logging | Done |
+| 2 | [`add-tool-approval-gate`](openspec/changes/archive/2026-11-14-add-tool-approval-gate/) | Tool registry, risk levels, approve/reject cards, conversational edits ([`add-stale-approval-notices`](openspec/changes/archive/2026-11-15-add-stale-approval-notices/), [`refine-context-and-approvals`](openspec/changes/archive/2026-11-15-refine-context-and-approvals/)) | Done |
+| 3 | [`add-tasks-and-reminders`](openspec/changes/archive/2026-11-15-add-tasks-and-reminders/) | First real tools (tasks, reminders) plus the 30s delivery scheduler | Done |
 | 4 | `add-model-routing` | Model tiers, fallbacks, cost tracking, budget alerts | Planned |
 | 5 | `add-calendar` | Read the calendar, propose changes through the gate | Planned |
 | 6 | `add-email` | Summaries, drafts, sending via approval | Planned |
@@ -89,16 +95,19 @@ Changes 9 and 10 depend only on change 2 and can be pulled earlier.
 ```
 cmd/nestor/          Entrypoint
 internal/            Application packages
+evals/               On-demand real-model evaluation suites (-tags eval)
 deploy/              Docker Compose stack and LiteLLM configuration
 docs/vision.md       Product intent, users, success criteria, roadmap, open questions
 openspec/config.yaml Stack, constitution, code conventions and spec rules
-openspec/changes/    One folder per change: proposal, design, specs and tasks
+openspec/specs/      Living specifications of implemented capabilities
+openspec/changes/    Active and archived OpenSpec changes (proposal, design, specs, tasks)
 ```
 
 ## Running the stack
 
 You need Docker with the Compose plugin, a Telegram bot token from
-[@BotFather](https://t.me/BotFather), your numeric Telegram ID, and Gemini and Anthropic API keys.
+[@BotFather](https://t.me/BotFather), your numeric Telegram ID, and a Gemini API key (plus an
+Anthropic API key only if you enable an Anthropic model in [`deploy/litellm.yaml`](deploy/litellm.yaml)).
 
 ```sh
 cp deploy/.env.example deploy/.env   # then replace every value
@@ -109,7 +118,7 @@ Nestor applies database migrations and syncs the allowlist each time it starts.
 
 ### Environment variables
 
-Set these in `deploy/.env`, which git ignores.
+Set these in `deploy/.env`, which git ignores (validated by [`internal/config/config.go`](internal/config/config.go)).
 
 | Variable | Required | Meaning |
 |---|---|---|
@@ -117,21 +126,31 @@ Set these in `deploy/.env`, which git ignores.
 | `ALLOWED_TELEGRAM_USERS` | Yes | Comma-separated `telegram_id:display_name` pairs. Only these people are served; removing one disables them and keeps their data |
 | `POSTGRES_PASSWORD` | Yes | Database password, also used inside a URL, so keep it URL-safe |
 | `LITELLM_MASTER_KEY` | Yes | Key Nestor uses to reach the LiteLLM proxy. Must start with `sk-` |
-| `GEMINI_API_KEY` | Yes | Provider key for the `cheap` alias. Stays inside the LiteLLM container |
-| `ANTHROPIC_API_KEY` | Yes | Provider key for the `strong` alias. Stays inside the LiteLLM container |
+| `GEMINI_API_KEY` | Yes | Provider key for the `cheap` and `strong` aliases in `deploy/litellm.yaml`. Stays inside the LiteLLM container |
+| `ANTHROPIC_API_KEY` | No | Optional provider key if an Anthropic model is enabled in `deploy/litellm.yaml`. Stays inside the LiteLLM container |
 | `LLM_MODEL` | No | Model alias to use. Default `cheap` |
-| `HISTORY_LIMIT` | No | Messages of the conversation sent to the model. Default 30 |
-| `MAX_LOOP_ITERATIONS` | No | Model calls allowed for one message. Default 8 |
+| `HISTORY_LIMIT` | No | Messages of the conversation sent to the model. Default `30` |
+| `MAX_LOOP_ITERATIONS` | No | Model calls allowed for one message. Default `8` |
+| `ENABLE_DEMO_TOOLS` | No | Register `current_time` and `notify_self` demo tools. Default `false` |
+| `APPROVAL_TTL` | No | How long a proposed critical action waits for a tap before expiring. Default `24h` |
+| `APPROVAL_STALE_AFTER` | No | How long an approved action may run before a sweep marks its outcome unknown and notifies the owner. Default `5m` |
+| `TIMEZONE` | No | IANA timezone for local clock context, tasks and reminders. Default `Europe/Zurich` |
 
 ### Using the bot
 
-Send it a text message. `/new` starts a fresh conversation. Other message types get a short
-notice, and messages from anyone not on the allowlist are ignored and logged.
+Send it a text message to chat, manage tasks, or set reminders. Critical actions (`task_delete`,
+`reminder_cancel`, and `notify_self` when `ENABLE_DEMO_TOOLS=true`) post an inline Telegram
+approval card with **Approve** and **Reject** buttons; replying in chat to adjust the request
+supersedes the earlier proposal with a fresh card. `/new` starts a fresh conversation. Other
+message types get a short notice, and messages from anyone not on the allowlist are ignored and
+logged.
 
-### Querying the call log
+### Querying the call and audit tables
 
-Every model request is a row in `model_calls`, with its request and response bodies. A retried
-request is two rows. Open a database shell with:
+Every model request is a row in `model_calls` (with its request and response bodies; a retried
+request is two rows), tool dispatches are recorded in `tool_calls`, approval proposals and
+outcomes live in `pending_actions`, and user items live in `tasks` and `reminders`. Open a
+database shell with:
 
 ```sh
 docker compose -f deploy/docker-compose.yml exec postgres psql -U nestor nestor
