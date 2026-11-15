@@ -535,13 +535,16 @@ func (s *FakeStore) actionIndex(user identity.UserID, id string) int {
 }
 
 // FailStaleApprovals implements store.Store.
-func (s *FakeStore) FailStaleApprovals(ctx context.Context, cutoff time.Time) ([]store.FailedApproval, error) {
+func (s *FakeStore) FailStaleApprovals(ctx context.Context, user identity.UserID, cutoff time.Time) ([]store.FailedApproval, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var failed []store.FailedApproval
 	for i := range s.actions {
 		a := &s.actions[i]
-		if a.State == store.PendingApproved && a.DecidedAt != nil && a.DecidedAt.Before(cutoff) {
+		if a.UserID == user && a.State == store.PendingApproved && a.DecidedAt != nil && a.DecidedAt.Before(cutoff) {
 			a.State = store.PendingFailed
 			a.Error = store.OutcomeUnknownError
 			failed = append(failed, store.FailedApproval{ID: a.ID, UserID: a.UserID, Preview: a.Preview, ChatID: a.NotifyChatID})

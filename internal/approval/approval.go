@@ -287,18 +287,27 @@ func (g *Gate) instant() time.Time {
 // unknown, and the owner is told in the card's chat through out. A nil out sends no notices. A
 // failed action is never executed again.
 func SweepStale(ctx context.Context, st store.Store, out Notifier, now time.Time, staleAfter time.Duration) (int64, error) {
-	failed, err := st.FailStaleApprovals(ctx, now.Add(-staleAfter))
+	users, err := st.ListActiveUsers(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("sweep stale approvals: %w", err)
 	}
-	for _, f := range failed {
-		owner := identity.WithUser(ctx, f.UserID)
-		recordNote(owner, st, f.UserID, fmt.Sprintf(noteUnknown, f.ID))
-		SendOutcomeNotice(owner, st, out, store.PendingAction{
-			ID: f.ID, UserID: f.UserID, Preview: f.Preview, NotifyChatID: f.ChatID,
-		})
+	cutoff := now.Add(-staleAfter)
+	var total int64
+	for _, user := range users {
+		owner := identity.WithUser(ctx, user)
+		failed, err := st.FailStaleApprovals(owner, user, cutoff)
+		if err != nil {
+			return total, fmt.Errorf("sweep stale approvals: %w", err)
+		}
+		for _, f := range failed {
+			recordNote(owner, st, f.UserID, fmt.Sprintf(noteUnknown, f.ID))
+			SendOutcomeNotice(owner, st, out, store.PendingAction{
+				ID: f.ID, UserID: f.UserID, Preview: f.Preview, NotifyChatID: f.ChatID,
+			})
+		}
+		total += int64(len(failed))
 	}
-	return int64(len(failed)), nil
+	return total, nil
 }
 
 // SendOutcomeNotice tells the owner of an action whose outcome is unknown, in the chat its card

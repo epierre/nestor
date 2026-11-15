@@ -203,10 +203,9 @@ type Store interface {
 	// UpdatePendingAction applies update only while the user's action is in state from. It
 	// reports false when it is in another state, which is how a repeated decision loses the race.
 	UpdatePendingAction(ctx context.Context, user identity.UserID, id, from string, update PendingUpdate) (bool, error)
-	// FailStaleApprovals marks every action approved before cutoff as failed as outcome unknown,
-	// for all users, and returns those actions. It is the one method without a user ID: it reads
-	// no user data beyond what the returned rows carry, and changes only approved rows past cutoff.
-	FailStaleApprovals(ctx context.Context, cutoff time.Time) ([]FailedApproval, error)
+	// FailStaleApprovals marks the user's actions approved before cutoff as failed as outcome
+	// unknown, and returns those actions.
+	FailStaleApprovals(ctx context.Context, user identity.UserID, cutoff time.Time) ([]FailedApproval, error)
 	// UnnotifiedOutcomes returns the user's actions failed as outcome unknown whose notice was not
 	// delivered yet.
 	UnnotifiedOutcomes(ctx context.Context, user identity.UserID) ([]PendingAction, error)

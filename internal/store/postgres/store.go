@@ -453,14 +453,17 @@ func (s *Store) UpdatePendingAction(ctx context.Context, user identity.UserID, i
 	return tag.RowsAffected() == 1, nil
 }
 
-// FailStaleApprovals implements store.Store. It is deliberately unscoped: see the interface.
-func (s *Store) FailStaleApprovals(ctx context.Context, cutoff time.Time) ([]store.FailedApproval, error) {
+// FailStaleApprovals implements store.Store.
+func (s *Store) FailStaleApprovals(ctx context.Context, user identity.UserID, cutoff time.Time) ([]store.FailedApproval, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return nil, err
+	}
 	rows, err := s.pool.Query(ctx, `
 		UPDATE pending_actions
-		SET state = 'failed', error = $2
-		WHERE state = 'approved' AND decided_at < $1
+		SET state = 'failed', error = $3
+		WHERE user_id = $1 AND state = 'approved' AND decided_at < $2
 		RETURNING id, user_id, preview, COALESCE(notify_chat_id, 0)`,
-		cutoff, store.OutcomeUnknownError)
+		user, cutoff, store.OutcomeUnknownError)
 	if err != nil {
 		return nil, fmt.Errorf("fail stale approvals: %w", err)
 	}

@@ -297,30 +297,39 @@ func staleApprovals(t *testing.T, st *Store, a, b identity.UserID, ctxA, ctxB co
 func TestSweepReturnsStaleRowsWithTheirOwnChats(t *testing.T) {
 	st, _, a, b, ctxA, ctxB := twoScoped(t)
 	staleApprovals(t, st, a, b, ctxA, ctxB)
+	cutoff := time.Now().Add(-time.Minute)
 
-	failed, err := st.FailStaleApprovals(context.Background(), time.Now().Add(-time.Minute))
+	failedA, err := st.FailStaleApprovals(ctxA, a, cutoff)
 	if err != nil {
-		t.Fatalf("FailStaleApprovals: %v", err)
+		t.Fatalf("FailStaleApprovals A: %v", err)
 	}
-	want := map[string]store.FailedApproval{
-		"stale-a": {ID: "stale-a", UserID: a, Preview: "Dentist at 3pm", ChatID: 501},
-		"stale-b": {ID: "stale-b", UserID: b, Preview: "Gym at 7am", ChatID: 502},
+	wantA := []store.FailedApproval{{ID: "stale-a", UserID: a, Preview: "Dentist at 3pm", ChatID: 501}}
+	if len(failedA) != 1 || failedA[0] != wantA[0] {
+		t.Fatalf("A's failed approvals %+v, want %+v", failedA, wantA)
 	}
-	if len(failed) != len(want) {
-		t.Fatalf("got %d failed approvals, want %d: %+v", len(failed), len(want), failed)
+	if gotB, err := st.GetPendingAction(ctxB, b, "stale-b"); err != nil || gotB.State != store.PendingApproved {
+		t.Fatalf("B's action after sweeping A: state=%q err=%v, want still approved", gotB.State, err)
 	}
-	for _, f := range failed {
-		if w, ok := want[f.ID]; !ok || f != w {
-			t.Errorf("failed approval %+v, want %+v", f, want[f.ID])
-		}
+
+	failedB, err := st.FailStaleApprovals(ctxB, b, cutoff)
+	if err != nil {
+		t.Fatalf("FailStaleApprovals B: %v", err)
+	}
+	wantB := []store.FailedApproval{{ID: "stale-b", UserID: b, Preview: "Gym at 7am", ChatID: 502}}
+	if len(failedB) != 1 || failedB[0] != wantB[0] {
+		t.Fatalf("B's failed approvals %+v, want %+v", failedB, wantB)
 	}
 }
 
 func TestUnnotifiedOutcomesPerUserUntilMarked(t *testing.T) {
 	st, _, a, b, ctxA, ctxB := twoScoped(t)
 	staleApprovals(t, st, a, b, ctxA, ctxB)
-	if _, err := st.FailStaleApprovals(context.Background(), time.Now().Add(-time.Minute)); err != nil {
-		t.Fatalf("FailStaleApprovals: %v", err)
+	cutoff := time.Now().Add(-time.Minute)
+	if _, err := st.FailStaleApprovals(ctxA, a, cutoff); err != nil {
+		t.Fatalf("FailStaleApprovals A: %v", err)
+	}
+	if _, err := st.FailStaleApprovals(ctxB, b, cutoff); err != nil {
+		t.Fatalf("FailStaleApprovals B: %v", err)
 	}
 
 	listA, err := st.UnnotifiedOutcomes(ctxA, a)

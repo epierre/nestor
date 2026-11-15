@@ -1,7 +1,7 @@
 ## 1. Store interface and user scoping
 
 - [x] 1.1 Add `ListActiveUsers(ctx)` to `store.Store`, `postgres.Store`, and `testutil.FakeStore`, returning only non-disabled users with an enabled identity, and remove `UsersWithDueReminders`. Test: integration `internal/store/postgres/store_test.go` `TestListActiveUsersSkipsDisabledIdentities`.
-- [ ] 1.2 Scope `FailStaleApprovals(ctx, user, cutoff)` to a single user with `store.RequireUser(ctx, user)` and `WHERE user_id = $1` in `postgres.Store` and `testutil.FakeStore`. Test: integration `internal/store/postgres/approval_store_test.go` `TestSweepReturnsStaleRowsWithTheirOwnChats` (updated to assert per-user scoping across two seeded users).
+- [x] 1.2 Scope `FailStaleApprovals(ctx, user, cutoff)` to a single user with `store.RequireUser(ctx, user)` and `WHERE user_id = $1` in `postgres.Store` and `testutil.FakeStore`. Test: integration `internal/store/postgres/approval_store_test.go` `TestSweepReturnsStaleRowsWithTheirOwnChats` (updated to assert per-user scoping across two seeded users).
 - [ ] 1.3 Extend `internal/store/postgres/scoping_test.go` `TestUnscopedCallReturnsError` to cover every user-data method on `store.Store` (including `FailStaleApprovals`, `DueReminders`, `ListTasks`, `GetReminder`, etc.). Test: `internal/store/postgres/scoping_test.go` `TestUnscopedCallReturnsError`.
 
 ## 2. Background sweeps and scheduler
