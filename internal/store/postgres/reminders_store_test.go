@@ -42,12 +42,12 @@ func TestDueRemindersPerUser(t *testing.T) {
 	rb := addReminder(t, st, ctxB, b, "B's", past, 502)
 	now := time.Now()
 
-	users, err := st.UsersWithDueReminders(context.Background(), now)
+	users, err := st.ListActiveUsers(context.Background())
 	if err != nil {
-		t.Fatalf("UsersWithDueReminders: %v", err)
+		t.Fatalf("ListActiveUsers: %v", err)
 	}
 	if !slices.Contains(users, a) || !slices.Contains(users, b) {
-		t.Errorf("users with due reminders %v, want both %d and %d", users, a, b)
+		t.Errorf("active users %v, want both %d and %d", users, a, b)
 	}
 
 	dueA, _ := st.DueReminders(ctxA, a, now)

@@ -180,9 +180,13 @@ type Reminder struct {
 	CancelledAt *time.Time // nil unless cancelled
 }
 
-// Store persists conversations, messages and model calls. Every method takes the user ID
-// explicitly and must call RequireUser before doing any work.
+// Store persists conversations, messages and model calls. Every user-data method takes the user
+// ID explicitly and must call RequireUser before doing any work; ListActiveUsers reads only the
+// identity directory so background loops can visit active users one by one.
 type Store interface {
+	// ListActiveUsers returns the IDs of enabled users that have at least one enabled platform
+	// identity, in ascending ID order.
+	ListActiveUsers(ctx context.Context) ([]identity.UserID, error)
 	// ActiveConversation returns the user's open conversation, creating one if there is none.
 	ActiveConversation(ctx context.Context, user identity.UserID) (Conversation, error)
 	// CloseConversation ends the user's open conversation, if any.
@@ -242,10 +246,6 @@ type Store interface {
 	// MarkReminderDelivered records that a pending reminder was sent. It reports false when the
 	// reminder was no longer pending.
 	MarkReminderDelivered(ctx context.Context, user identity.UserID, id int64, at time.Time) (bool, error)
-	// UsersWithDueReminders returns the IDs of the users that have a pending reminder due by now,
-	// for all users. It is the one reminder query without a user ID: it returns IDs only, and each
-	// reminder is then read with its owner in context.
-	UsersWithDueReminders(ctx context.Context, now time.Time) ([]identity.UserID, error)
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's

@@ -139,6 +139,36 @@ func (s *Store) ResolveIdentity(ctx context.Context, platform, externalID string
 	return user, nil
 }
 
+// ListActiveUsers implements store.Store. Like ResolveIdentity, it reads only the identity
+// directory so background loops can visit active allowlisted users one by one.
+func (s *Store) ListActiveUsers(ctx context.Context) ([]identity.UserID, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT u.id
+		FROM users u
+		WHERE u.disabled_at IS NULL
+			AND EXISTS (
+				SELECT 1 FROM user_identities i
+				WHERE i.user_id = u.id AND i.disabled_at IS NULL
+			)
+		ORDER BY u.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list active users: %w", err)
+	}
+	defer rows.Close()
+	var users []identity.UserID
+	for rows.Next() {
+		var id identity.UserID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan active user: %w", err)
+		}
+		users = append(users, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list active users: %w", err)
+	}
+	return users, nil
+}
+
 // ActiveConversation implements store.Store. Concurrent calls for one user get the same
 // conversation: the insert yields to the unique index on open conversations.
 func (s *Store) ActiveConversation(ctx context.Context, user identity.UserID) (store.Conversation, error) {

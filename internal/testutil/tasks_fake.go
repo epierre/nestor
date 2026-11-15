@@ -28,6 +28,7 @@ func (s *FakeStore) AddTask(ctx context.Context, user identity.UserID, task stor
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.touchUser(user)
 	task.ID = s.id()
 	task.UserID = user
 	task.CreatedAt = time.Now()
@@ -126,6 +127,7 @@ func (s *FakeStore) AddReminder(ctx context.Context, user identity.UserID, r sto
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.touchUser(user)
 	r.ID = s.id()
 	r.UserID = user
 	r.CreatedAt = time.Now()

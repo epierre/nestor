@@ -466,13 +466,23 @@ func TestOpenMigrates(t *testing.T) {
 	}
 }
 
-// twoScoped returns a store, two users and a context for each.
+// twoScoped returns a store, two active allowlisted users and a context for each.
 func twoScoped(t *testing.T) (st *Store, pool *pgxpool.Pool, a, b identity.UserID, ctxA, ctxB context.Context) {
 	t.Helper()
 	pool = migrated(t)
-	first, second := twoUsers(t, pool)
-	a, b = identity.UserID(first), identity.UserID(second)
-	return New(pool), pool, a, b,
+	st = New(pool)
+	syncAllowlist(t, st, "telegram",
+		AllowedIdentity{ExternalID: "100", DisplayName: "Ana"},
+		AllowedIdentity{ExternalID: "200", DisplayName: "Ben"},
+	)
+	var err error
+	if a, err = st.ResolveIdentity(context.Background(), "telegram", "100"); err != nil {
+		t.Fatalf("ResolveIdentity Ana: %v", err)
+	}
+	if b, err = st.ResolveIdentity(context.Background(), "telegram", "200"); err != nil {
+		t.Fatalf("ResolveIdentity Ben: %v", err)
+	}
+	return st, pool, a, b,
 		identity.WithUser(context.Background(), a), identity.WithUser(context.Background(), b)
 }
 
@@ -911,4 +921,63 @@ func TestRecordToolCall(t *testing.T) {
 			t.Errorf("latency_ms: got %d, want 42", got.latencyMS)
 		}
 	})
+}
+
+func TestListActiveUsersSkipsDisabledIdentities(t *testing.T) {
+	ctx := context.Background()
+	pool := migrated(t)
+	st := New(pool)
+
+	syncAllowlist(t, st, "telegram",
+		AllowedIdentity{ExternalID: "100", DisplayName: "Ana"},
+		AllowedIdentity{ExternalID: "200", DisplayName: "Ben"},
+	)
+	ana, err := st.ResolveIdentity(ctx, "telegram", "100")
+	if err != nil {
+		t.Fatalf("ResolveIdentity Ana: %v", err)
+	}
+	ben, err := st.ResolveIdentity(ctx, "telegram", "200")
+	if err != nil {
+		t.Fatalf("ResolveIdentity Ben: %v", err)
+	}
+
+	got, err := st.ListActiveUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveUsers: %v", err)
+	}
+	if want := []identity.UserID{ana, ben}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("active users %v, want %v", got, want)
+	}
+
+	// Removing Ben from the allowlist disables his identity and hides him from background sweeps.
+	syncAllowlist(t, st, "telegram", AllowedIdentity{ExternalID: "100", DisplayName: "Ana"})
+	got, err = st.ListActiveUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveUsers after removing Ben: %v", err)
+	}
+	if want := []identity.UserID{ana}; !reflect.DeepEqual(got, want) {
+		t.Errorf("active users after removing Ben: %v, want %v", got, want)
+	}
+
+	// Disabling Ana directly on users.disabled_at also excludes her even with an enabled identity.
+	if _, err := pool.Exec(ctx, `UPDATE users SET disabled_at = now() WHERE id = $1`, ana); err != nil {
+		t.Fatalf("disable Ana user row: %v", err)
+	}
+	got, err = st.ListActiveUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveUsers after disabling Ana: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("active users with all disabled: %v, want none", got)
+	}
+
+	// Re-adding Ben restores him to active users.
+	syncAllowlist(t, st, "telegram", AllowedIdentity{ExternalID: "200", DisplayName: "Ben"})
+	got, err = st.ListActiveUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveUsers after re-adding Ben: %v", err)
+	}
+	if want := []identity.UserID{ben}; !reflect.DeepEqual(got, want) {
+		t.Errorf("active users after re-adding Ben: %v, want %v", got, want)
+	}
 }
