@@ -116,6 +116,8 @@ func (t *NotifySelfTool) Schema() json.RawMessage {
 		"properties": {
 			"text": {
 				"type": "string",
+				"minLength": 1,
+				"pattern": "\\S",
 				"description": "The message text to send"
 			}
 		},
