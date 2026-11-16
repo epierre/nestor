@@ -1543,7 +1543,7 @@ func (secretResultTool) Description() string { return "Returns a secret payload.
 func (secretResultTool) Schema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"secret":{"type":"string"}}}`)
 }
-func (secretResultTool) Risk() tools.Risk                     { return tools.RiskRead }
+func (secretResultTool) Risk() tools.Risk                        { return tools.RiskRead }
 func (secretResultTool) Preview(json.RawMessage) (string, error) { return "", nil }
 func (secretResultTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
 	return tools.Result{Content: "top-secret-result"}, nil

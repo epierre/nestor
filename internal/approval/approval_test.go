@@ -867,9 +867,9 @@ func TestSweepAndNoticeStructuredLogs(t *testing.T) {
 		t.Errorf("logs leaked action preview: %s", raw)
 	}
 	var (
-		lines      int
-		requestID  string
-		sawNotice  bool
+		lines     int
+		requestID string
+		sawNotice bool
 	)
 	for _, lineText := range strings.Split(strings.TrimSpace(raw), "\n") {
 		if lineText == "" {

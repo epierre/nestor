@@ -18,4 +18,4 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Run `gofmt -l .`, `go vet ./...`, `go test -count=1 ./...`, `go test -count=1 -tags integration ./...`, and `openspec validate --all --strict`.
+- [x] 5.1 Run `gofmt -l .`, `go vet ./...`, `go test -count=1 ./...`, `go test -count=1 -tags integration ./...`, and `openspec validate --all --strict`.
