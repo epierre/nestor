@@ -1,9 +1,11 @@
 package approval
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math/big"
 	"regexp"
 	"strings"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
+	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
@@ -758,5 +761,142 @@ func TestSweepSkipsDisabledUser(t *testing.T) {
 	}
 	if got := h.stored(t, other, activeAction.ID); got.State != store.PendingFailed {
 		t.Errorf("active user's action state %q, want failed", got.State)
+	}
+}
+
+func TestApproveUpdatesLinkedToolCall(t *testing.T) {
+	t.Run("executed updates status, result and latency", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := identity.WithUser(context.Background(), testUser)
+		conv, err := h.st.ActiveConversation(ctx, testUser)
+		if err != nil {
+			t.Fatalf("ActiveConversation: %v", err)
+		}
+		tcID, err := h.st.RecordToolCall(ctx, testUser, store.ToolCall{
+			ConversationID: conv.ID,
+			ToolName:       "notify_self",
+			ArgsJSON:       testArgs,
+			Risk:           tools.RiskCritical,
+			Status:         store.ToolCallStatusProposed,
+			StartedAt:      h.now,
+		})
+		if err != nil {
+			t.Fatalf("RecordToolCall: %v", err)
+		}
+		action := h.propose(t, testUser)
+		if err := h.st.LinkActionToolCall(ctx, testUser, action.ID, tcID); err != nil {
+			t.Fatalf("LinkActionToolCall: %v", err)
+		}
+
+		if _, err := h.decide(testUser, action.ID, Approve); err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+		calls := h.st.ToolCalls(testUser)
+		if len(calls) != 1 {
+			t.Fatalf("got %d tool calls, want 1", len(calls))
+		}
+		if calls[0].Status != store.ToolCallStatusExecuted || len(calls[0].ResultJSON) == 0 || calls[0].Error != "" {
+			t.Errorf("tool call = %+v, want status executed with result and empty error", calls[0])
+		}
+	})
+
+	t.Run("execution failure updates status and error", func(t *testing.T) {
+		st := testutil.NewFakeStore()
+		reg := tools.NewRegistry()
+		boom := errors.New("delivery channel broken")
+		if err := reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error {
+			return boom
+		})); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		tool, _ := reg.Lookup("notify_self")
+		gate := New(st, reg, testTTL)
+		ctx := identity.WithUser(context.Background(), testUser)
+		conv, err := st.ActiveConversation(ctx, testUser)
+		if err != nil {
+			t.Fatalf("ActiveConversation: %v", err)
+		}
+		tcID, err := st.RecordToolCall(ctx, testUser, store.ToolCall{
+			ConversationID: conv.ID,
+			ToolName:       "notify_self",
+			ArgsJSON:       testArgs,
+			Risk:           tools.RiskCritical,
+			Status:         store.ToolCallStatusProposed,
+			StartedAt:      time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("RecordToolCall: %v", err)
+		}
+		action, err := gate.Propose(ctx, testUser, tool, testArgs)
+		if err != nil {
+			t.Fatalf("Propose: %v", err)
+		}
+		if err := st.LinkActionToolCall(ctx, testUser, action.ID, tcID); err != nil {
+			t.Fatalf("LinkActionToolCall: %v", err)
+		}
+
+		if _, err := gate.Decide(ctx, testUser, action.ID, Approve); !errors.Is(err, boom) {
+			t.Fatalf("Decide err = %v, want %v", err, boom)
+		}
+		calls := st.ToolCalls(testUser)
+		if len(calls) != 1 {
+			t.Fatalf("got %d tool calls, want 1", len(calls))
+		}
+		if calls[0].Status != store.ToolCallStatusError || !strings.Contains(calls[0].Error, boom.Error()) {
+			t.Errorf("tool call = %+v, want status error mentioning %q", calls[0], boom.Error())
+		}
+	})
+}
+
+func TestSweepAndNoticeStructuredLogs(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&logs, nil))))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := newHarness(t)
+	h.stallWithCard(t, testUser, 900)
+	notifier := &fakeNotifier{}
+
+	if _, err := SweepStale(context.Background(), h.st, notifier, h.now.Add(10*time.Minute), 5*time.Minute); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+
+	raw := logs.String()
+	if strings.Contains(raw, "Dentist at 3pm") {
+		t.Errorf("logs leaked action preview: %s", raw)
+	}
+	var (
+		lines      int
+		requestID  string
+		sawNotice  bool
+	)
+	for _, lineText := range strings.Split(strings.TrimSpace(raw), "\n") {
+		if lineText == "" {
+			continue
+		}
+		lines++
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(lineText), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", lineText, err)
+		}
+		rid, _ := entry["request_id"].(string)
+		if rid == "" {
+			t.Errorf("log line missing request_id: %s", lineText)
+		}
+		if requestID == "" {
+			requestID = rid
+		} else if rid != requestID {
+			t.Errorf("log line request_id = %q, want shared %q", rid, requestID)
+		}
+		if uid, _ := entry["user_id"].(float64); uid != float64(testUser) {
+			t.Errorf("log line user_id = %v, want %v: %s", entry["user_id"], float64(testUser), lineText)
+		}
+		if entry["msg"] == "outcome notice sent" {
+			sawNotice = true
+		}
+	}
+	if lines == 0 || !sawNotice {
+		t.Errorf("sawNotice=%v lines=%d, want outcome notice sent log; raw logs:\n%s", sawNotice, lines, raw)
 	}
 }

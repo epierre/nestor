@@ -10,7 +10,7 @@
 
 ## 3. Approval execution audit and structured sweep logs
 
-- [ ] 3.1 Update `approval.Gate` (`internal/approval/approval.go`) to call `CompleteToolCall` on linked `tool_calls` rows after approved execution or failure, emit structured `slog` entries for critical execution and delivered outcome notices, and attach `obs.WithRequestID` in `approval.SweepStale` and `reminders.deliverDue`. Prove with `TestApproveUpdatesLinkedToolCall` and `TestSweepAndNoticeStructuredLogs` in `internal/approval/approval_test.go`, and `TestDeliverDueLogsRequestID` in `internal/reminders/reminders_test.go`.
+- [x] 3.1 Update `approval.Gate` (`internal/approval/approval.go`) to call `CompleteToolCall` on linked `tool_calls` rows after approved execution or failure, emit structured `slog` entries for critical execution and delivered outcome notices, and attach `obs.WithRequestID` in `approval.SweepStale` and `reminders.deliverDue`. Prove with `TestApproveUpdatesLinkedToolCall` and `TestSweepAndNoticeStructuredLogs` in `internal/approval/approval_test.go`, and `TestDeliverDueLogsRequestID` in `internal/reminders/reminders_test.go`.
 
 ## 4. Agent audit linkage, tool logs, and zero-chat notice fallback
 

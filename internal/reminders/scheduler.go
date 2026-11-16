@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store"
 )
 
@@ -43,6 +44,7 @@ func Run(ctx context.Context, st DueStore, n Notifier, every time.Duration) {
 // tick. Active users come from the identity directory, and each user's reminders are read with
 // that user in context.
 func deliverDue(ctx context.Context, st DueStore, n Notifier, now time.Time) error {
+	ctx = obs.WithRequestID(ctx, obs.NewRequestID())
 	users, err := st.ListActiveUsers(ctx)
 	if err != nil {
 		return fmt.Errorf("list active users for reminders: %w", err)
@@ -59,8 +61,13 @@ func deliverDue(ctx context.Context, st DueStore, n Notifier, now time.Time) err
 				slog.WarnContext(owner, "reminder not sent; retried on next tick", "reminder_id", r.ID, "error", err)
 				continue
 			}
-			if _, err := st.MarkReminderDelivered(owner, user, r.ID, now); err != nil {
+			ok, err := st.MarkReminderDelivered(owner, user, r.ID, now)
+			if err != nil {
 				slog.ErrorContext(owner, "reminder sent but not recorded", "reminder_id", r.ID, "error", err)
+				continue
+			}
+			if ok {
+				slog.InfoContext(owner, "reminder delivered", "reminder_id", r.ID)
 			}
 		}
 	}

@@ -1,8 +1,10 @@
 package reminders
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/epierre/nestor/internal/approval"
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
@@ -223,5 +226,46 @@ func TestCancelNonPendingReminderShowsNoSuchReminder(t *testing.T) {
 	tooLong := strings.Repeat("x", 501)
 	if _, err := h.st.AddReminder(ctx, owner, store.Reminder{Text: tooLong, DueAt: now.Add(time.Hour), ChatID: ownerChat}); err == nil {
 		t.Error("FakeStore.AddReminder accepted a 501-rune text")
+	}
+}
+
+func TestDeliverDueLogsRequestID(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&logs, nil))))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := newHarness(t)
+	addDue(t, h.st, owner, "Secret medical appointment", ownerChat)
+
+	if err := deliverDue(context.Background(), h.st, &recordingNotifier{}, now); err != nil {
+		t.Fatalf("deliverDue: %v", err)
+	}
+
+	raw := logs.String()
+	if strings.Contains(raw, "Secret medical appointment") {
+		t.Errorf("logs leaked reminder text: %s", raw)
+	}
+	var sawDelivered bool
+	for _, lineText := range strings.Split(strings.TrimSpace(raw), "\n") {
+		if lineText == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(lineText), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", lineText, err)
+		}
+		if entry["msg"] == "reminder delivered" {
+			sawDelivered = true
+			if rid, _ := entry["request_id"].(string); rid == "" {
+				t.Errorf("reminder delivered log missing request_id: %s", lineText)
+			}
+			if uid, _ := entry["user_id"].(float64); uid != float64(owner) {
+				t.Errorf("reminder delivered user_id = %v, want %v", entry["user_id"], float64(owner))
+			}
+		}
+	}
+	if !sawDelivered {
+		t.Errorf("missing 'reminder delivered' log line; raw logs:\n%s", raw)
 	}
 }
