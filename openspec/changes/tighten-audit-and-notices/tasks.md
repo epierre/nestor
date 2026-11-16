@@ -14,7 +14,7 @@
 
 ## 4. Agent audit linkage, tool logs, and zero-chat notice fallback
 
-- [ ] 4.1 Update `Agent` (`internal/agent/agent.go`) to pass `model_call_id` into `dispatchToolCalls`, link proposed actions via `LinkActionToolCall`, emit `"tool call finished"` structured logs without tool arguments/results, and fall back to `channel.ChatFrom(ctx)` in `resendOutcomeNotices` when `NotifyChatID == 0`. Prove with `TestToolCallsLinkedToModelCallAndPendingAction`, `TestToolDispatchStructuredLogOmitsArguments`, and `TestUnrecordedChatNoticeDeliveredOnNextMessage` in `internal/agent/agent_test.go`.
+- [x] 4.1 Update `Agent` (`internal/agent/agent.go`) to pass `model_call_id` into `dispatchToolCalls`, link proposed actions via `LinkActionToolCall`, emit `"tool call finished"` structured logs without tool arguments/results, and fall back to `channel.ChatFrom(ctx)` in `resendOutcomeNotices` when `NotifyChatID == 0`. Prove with `TestToolCallsLinkedToModelCallAndPendingAction`, `TestToolDispatchStructuredLogOmitsArguments`, and `TestUnrecordedChatNoticeDeliveredOnNextMessage` in `internal/agent/agent_test.go`.
 
 ## 5. Verification
 
