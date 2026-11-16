@@ -51,10 +51,18 @@ func TestUnscopedCallReturnsError(t *testing.T) {
 				return err
 			}},
 			{"RecordModelCall", func(ctx context.Context) error {
-				return st.RecordModelCall(ctx, user, store.ModelCall{})
+				_, err := st.RecordModelCall(ctx, user, store.ModelCall{})
+				return err
 			}},
 			{"RecordToolCall", func(ctx context.Context) error {
-				return st.RecordToolCall(ctx, user, store.ToolCall{})
+				_, err := st.RecordToolCall(ctx, user, store.ToolCall{})
+				return err
+			}},
+			{"LinkActionToolCall", func(ctx context.Context) error {
+				return st.LinkActionToolCall(ctx, user, "abc", 1)
+			}},
+			{"CompleteToolCall", func(ctx context.Context) error {
+				return st.CompleteToolCall(ctx, user, 1, store.ToolCallStatusExecuted, nil, "", time.Millisecond)
 			}},
 			{"ProposeAction", func(ctx context.Context) error {
 				return st.ProposeAction(ctx, user, store.PendingAction{})

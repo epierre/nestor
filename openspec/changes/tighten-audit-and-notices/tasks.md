@@ -2,7 +2,7 @@
 
 ## 1. Schema migration and store audit linkage
 
-- [ ] 1.1 Add migration `0007_audit_and_schema_cleanup.{up,down}.sql` (dropping `user_identities.chat_id`, removing `'pending'` from `tool_calls.status`, adding composite `(id, user_id)` foreign keys on `tool_calls.model_call_id` and `pending_actions.tool_call_id`) and update `Store` (`RecordModelCall` and `RecordToolCall` returning `(int64, error)`, `PendingAction.ToolCallID`, `LinkActionToolCall`, `CompleteToolCall`, removing `ToolCallStatusPending`) in `internal/store`, `internal/store/postgres`, and `internal/testutil`. Prove with `TestAuditLinksAndCompleteToolCall` and `TestMigrate0007UpAndDown` in `internal/store/postgres/store_test.go` plus `TestUnscopedCallReturnsError` in `internal/store/postgres/scoping_test.go`.
+- [x] 1.1 Add migration `0007_audit_and_schema_cleanup.{up,down}.sql` (dropping `user_identities.chat_id`, removing `'pending'` from `tool_calls.status`, adding composite `(id, user_id)` foreign keys on `tool_calls.model_call_id` and `pending_actions.tool_call_id`) and update `Store` (`RecordModelCall` and `RecordToolCall` returning `(int64, error)`, `PendingAction.ToolCallID`, `LinkActionToolCall`, `CompleteToolCall`, removing `ToolCallStatusPending`) in `internal/store`, `internal/store/postgres`, and `internal/testutil`. Prove with `TestAuditLinksAndCompleteToolCall` and `TestMigrate0007UpAndDown` in `internal/store/postgres/store_test.go` plus `TestUnscopedCallReturnsError` in `internal/store/postgres/scoping_test.go`.
 
 ## 2. Helper cleanup in tools and entrypoint
 

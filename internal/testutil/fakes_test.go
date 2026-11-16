@@ -26,7 +26,7 @@ func TestFakeStoreUnscopedCallReturnsError(t *testing.T) {
 	if _, err := s.RecentMessages(ctx, 1, 1, 10); !errors.Is(err, identity.ErrNoUser) {
 		t.Errorf("RecentMessages: got error %v, want ErrNoUser", err)
 	}
-	if err := s.RecordModelCall(ctx, 1, store.ModelCall{}); !errors.Is(err, identity.ErrNoUser) {
+	if _, err := s.RecordModelCall(ctx, 1, store.ModelCall{}); !errors.Is(err, identity.ErrNoUser) {
 		t.Errorf("RecordModelCall: got error %v, want ErrNoUser", err)
 	}
 }

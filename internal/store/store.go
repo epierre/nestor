@@ -21,6 +21,12 @@ var (
 	// ErrIdentityNotFound is returned when a platform identity is unknown or disabled. The two
 	// are not told apart.
 	ErrIdentityNotFound = errors.New("identity not found")
+	// ErrModelCallNotFound is returned when a model call does not exist or belongs to another
+	// user. The two are not told apart.
+	ErrModelCallNotFound = errors.New("model call not found")
+	// ErrToolCallNotFound is returned when a tool call does not exist or belongs to another user.
+	// The two are not told apart.
+	ErrToolCallNotFound = errors.New("tool call not found")
 )
 
 // Conversation is a sequence of messages owned by one user.
@@ -69,7 +75,6 @@ const (
 	ToolCallStatusExecuted = "executed"
 	ToolCallStatusRejected = "rejected"
 	ToolCallStatusError    = "error"
-	ToolCallStatusPending  = "pending"
 	ToolCallStatusProposed = "proposed"
 )
 
@@ -114,6 +119,7 @@ var ErrActionNotFound = errors.New("pending action not found")
 type PendingAction struct {
 	ID           string
 	UserID       identity.UserID
+	ToolCallID   *int64 // set when proposed from a recorded tool call
 	ToolName     string
 	ArgsJSON     json.RawMessage
 	ArgsHash     string
@@ -194,10 +200,16 @@ type Store interface {
 	AppendMessage(ctx context.Context, user identity.UserID, conversationID int64, role model.Role, content string) (Message, error)
 	// RecentMessages returns up to limit of the newest messages, oldest first.
 	RecentMessages(ctx context.Context, user identity.UserID, conversationID int64, limit int) ([]Message, error)
-	RecordModelCall(ctx context.Context, user identity.UserID, call ModelCall) error
-	RecordToolCall(ctx context.Context, user identity.UserID, call ToolCall) error
+	// RecordModelCall stores a model call for user and returns its row ID.
+	RecordModelCall(ctx context.Context, user identity.UserID, call ModelCall) (int64, error)
+	// RecordToolCall stores a tool call for user and returns its row ID.
+	RecordToolCall(ctx context.Context, user identity.UserID, call ToolCall) (int64, error)
+	// CompleteToolCall updates the status, result or error, and latency of user's tool call.
+	CompleteToolCall(ctx context.Context, user identity.UserID, id int64, status string, resultJSON json.RawMessage, errText string, latency time.Duration) error
 	// ProposeAction stores a new pending action owned by user.
 	ProposeAction(ctx context.Context, user identity.UserID, action PendingAction) error
+	// LinkActionToolCall links user's pending action to the triggering tool call for user.
+	LinkActionToolCall(ctx context.Context, user identity.UserID, actionID string, toolCallID int64) error
 	// GetPendingAction returns one of the user's pending actions, or ErrActionNotFound.
 	GetPendingAction(ctx context.Context, user identity.UserID, id string) (PendingAction, error)
 	// UpdatePendingAction applies update only while the user's action is in state from. It

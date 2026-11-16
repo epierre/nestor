@@ -588,8 +588,8 @@ type brokenLog struct {
 	*testutil.FakeStore
 }
 
-func (brokenLog) RecordModelCall(context.Context, identity.UserID, store.ModelCall) error {
-	return errStoreDown
+func (brokenLog) RecordModelCall(context.Context, identity.UserID, store.ModelCall) (int64, error) {
+	return 0, errStoreDown
 }
 
 func TestUnrecordableCallReturnsError(t *testing.T) {

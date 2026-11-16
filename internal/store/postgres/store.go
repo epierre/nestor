@@ -258,45 +258,61 @@ func (s *Store) RecentMessages(ctx context.Context, user identity.UserID, conver
 
 // RecordModelCall implements store.Store. Latency is stored in milliseconds, rounded up from
 // below one so that a call that took time never reads as zero.
-func (s *Store) RecordModelCall(ctx context.Context, user identity.UserID, call store.ModelCall) error {
+func (s *Store) RecordModelCall(ctx context.Context, user identity.UserID, call store.ModelCall) (int64, error) {
 	if err := store.RequireUser(ctx, user); err != nil {
-		return err
+		return 0, err
 	}
-	latency := call.Latency.Milliseconds()
-	if latency == 0 && call.Latency > 0 {
-		latency = 1
-	}
-	_, err := s.pool.Exec(ctx, `
+	var id int64
+	err := s.pool.QueryRow(ctx, `
 		INSERT INTO model_calls (user_id, conversation_id, model, started_at, latency_ms,
 			prompt_tokens, completion_tokens, cost_usd, status, error, request_json, response_json)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-		user, call.ConversationID, call.Model, call.StartedAt, latency,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id`,
+		user, call.ConversationID, call.Model, call.StartedAt, roundLatencyMS(call.Latency),
 		call.PromptTokens, call.CompletionTokens, call.CostUSD, call.Status, call.Error,
-		call.RequestJSON, call.ResponseJSON)
+		call.RequestJSON, call.ResponseJSON).Scan(&id)
 	if err != nil {
-		return fmt.Errorf("record model call: %w", conversationError(err))
+		return 0, fmt.Errorf("record model call: %w", conversationError(err))
 	}
-	return nil
+	return id, nil
 }
 
 // RecordToolCall implements store.Store. Latency is stored in milliseconds, rounded up from
 // below one so that a call that took time never reads as zero.
-func (s *Store) RecordToolCall(ctx context.Context, user identity.UserID, call store.ToolCall) error {
+func (s *Store) RecordToolCall(ctx context.Context, user identity.UserID, call store.ToolCall) (int64, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return 0, err
+	}
+	var id int64
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO tool_calls (user_id, conversation_id, model_call_id, tool_name, args_json,
+			risk, status, result_json, error, started_at, latency_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id`,
+		user, call.ConversationID, call.ModelCallID, call.ToolName, call.ArgsJSON,
+		call.Risk, call.Status, call.ResultJSON, call.Error, call.StartedAt, roundLatencyMS(call.Latency)).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("record tool call: %w", toolCallError(err))
+	}
+	return id, nil
+}
+
+// CompleteToolCall implements store.Store. Latency is stored in milliseconds, rounded up from
+// below one so that a call that took time never reads as zero.
+func (s *Store) CompleteToolCall(ctx context.Context, user identity.UserID, id int64, status string, resultJSON json.RawMessage, errText string, latency time.Duration) error {
 	if err := store.RequireUser(ctx, user); err != nil {
 		return err
 	}
-	latency := call.Latency.Milliseconds()
-	if latency == 0 && call.Latency > 0 {
-		latency = 1
-	}
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO tool_calls (user_id, conversation_id, model_call_id, tool_name, args_json,
-			risk, status, result_json, error, started_at, latency_ms)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		user, call.ConversationID, call.ModelCallID, call.ToolName, call.ArgsJSON,
-		call.Risk, call.Status, call.ResultJSON, call.Error, call.StartedAt, latency)
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE tool_calls
+		SET status = $3, result_json = $4, error = $5, latency_ms = $6
+		WHERE id = $1 AND user_id = $2`,
+		id, user, status, resultJSON, errText, roundLatencyMS(latency))
 	if err != nil {
-		return fmt.Errorf("record tool call: %w", conversationError(err))
+		return fmt.Errorf("complete tool call: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return store.ErrToolCallNotFound
 	}
 	return nil
 }
@@ -307,21 +323,46 @@ func (s *Store) ProposeAction(ctx context.Context, user identity.UserID, action 
 		return err
 	}
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO pending_actions (id, user_id, tool_name, args_json, args_hash, preview,
-			state, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		action.ID, user, action.ToolName, action.ArgsJSON, action.ArgsHash, action.Preview,
-		action.State, action.CreatedAt, action.ExpiresAt)
+		INSERT INTO pending_actions (id, user_id, tool_call_id, tool_name, args_json, args_hash,
+			preview, state, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		action.ID, user, action.ToolCallID, action.ToolName, action.ArgsJSON, action.ArgsHash,
+		action.Preview, action.State, action.CreatedAt, action.ExpiresAt)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
+			return fmt.Errorf("propose action: %w", store.ErrToolCallNotFound)
+		}
 		return fmt.Errorf("propose action: %w", err)
 	}
 	return nil
 }
 
+// LinkActionToolCall implements store.Store.
+func (s *Store) LinkActionToolCall(ctx context.Context, user identity.UserID, actionID string, toolCallID int64) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE pending_actions SET tool_call_id = $3
+		WHERE id = $1 AND user_id = $2`, actionID, user, toolCallID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
+			return fmt.Errorf("link action tool call: %w", store.ErrToolCallNotFound)
+		}
+		return fmt.Errorf("link action tool call: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return store.ErrActionNotFound
+	}
+	return nil
+}
+
 // pendingColumns lists the columns that scanPending reads, in its order.
-const pendingColumns = `id, user_id, tool_name, args_json::text, args_hash, preview, state, created_at,
-	expires_at, decided_at, executed_at, result_json::text, error, superseded_by, card_sent_at,
-	notify_chat_id, outcome_notice_sent_at`
+const pendingColumns = `id, user_id, tool_call_id, tool_name, args_json::text, args_hash, preview,
+	state, created_at, expires_at, decided_at, executed_at, result_json::text, error, superseded_by,
+	card_sent_at, notify_chat_id, outcome_notice_sent_at`
 
 // scanPending reads one row of pendingColumns.
 func scanPending(row pgx.Row) (store.PendingAction, error) {
@@ -332,10 +373,10 @@ func scanPending(row pgx.Row) (store.PendingAction, error) {
 		supersede  *string
 		chatID     *int64
 	)
-	err := row.Scan(&action.ID, &action.UserID, &action.ToolName, &argsJSON, &action.ArgsHash,
-		&action.Preview, &action.State, &action.CreatedAt, &action.ExpiresAt, &action.DecidedAt,
-		&action.ExecutedAt, &resultJSON, &action.Error, &supersede, &action.CardSentAt,
-		&chatID, &action.OutcomeNoticeSentAt)
+	err := row.Scan(&action.ID, &action.UserID, &action.ToolCallID, &action.ToolName, &argsJSON,
+		&action.ArgsHash, &action.Preview, &action.State, &action.CreatedAt, &action.ExpiresAt,
+		&action.DecidedAt, &action.ExecutedAt, &resultJSON, &action.Error, &supersede,
+		&action.CardSentAt, &chatID, &action.OutcomeNoticeSentAt)
 	if err != nil {
 		return store.PendingAction{}, err
 	}
@@ -558,10 +599,29 @@ func (s *Store) MarkOutcomeNoticed(ctx context.Context, user identity.UserID, id
 	return nil
 }
 
+func roundLatencyMS(d time.Duration) int64 {
+	ms := d.Milliseconds()
+	if ms == 0 && d > 0 {
+		return 1
+	}
+	return ms
+}
+
 // conversationError turns the composite foreign key's refusal into ErrConversationNotFound.
 func conversationError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
+		return store.ErrConversationNotFound
+	}
+	return err
+}
+
+func toolCallError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
+		if pgErr.ConstraintName == "tool_calls_model_call_user_fk" {
+			return store.ErrModelCallNotFound
+		}
 		return store.ErrConversationNotFound
 	}
 	return err

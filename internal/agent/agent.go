@@ -180,7 +180,7 @@ func (a *Agent) recordCalls(ctx context.Context, user identity.UserID, conversat
 			call.CompletionTokens = resp.Usage.CompletionTokens
 			call.CostUSD = resp.Usage.CostUSD
 		}
-		if err := a.store.RecordModelCall(ctx, user, call); err != nil {
+		if _, err := a.store.RecordModelCall(ctx, user, call); err != nil {
 			return fmt.Errorf("record model call: %w", err)
 		}
 		slog.InfoContext(ctx, "model call finished",
@@ -276,7 +276,7 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 		if len(bytes.TrimSpace(args)) == 0 {
 			args = json.RawMessage("{}")
 		}
-		recordErr := a.store.RecordToolCall(ctx, user, store.ToolCall{
+		_, recordErr := a.store.RecordToolCall(ctx, user, store.ToolCall{
 			ConversationID: conversationID,
 			ToolName:       call.Name,
 			ArgsJSON:       args,
