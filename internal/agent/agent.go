@@ -129,7 +129,8 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 			Messages: messages,
 			Tools:    modelTools,
 		})
-		if err := a.recordCalls(ctx, user, conversation.ID, resp); err != nil {
+		modelCallID, err := a.recordCalls(ctx, user, conversation.ID, resp)
+		if err != nil {
 			return "", err
 		}
 		if callErr != nil {
@@ -145,8 +146,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 		if a.opts.Tools == nil {
 			messages = appendToolRefusals(messages, resp)
 		} else {
-			var err error
-			messages, err = a.dispatchToolCalls(ctx, user, conversation.ID, messages, resp)
+			messages, err = a.dispatchToolCalls(ctx, user, conversation.ID, modelCallID, messages, resp)
 			if err != nil {
 				return "", err
 			}
@@ -156,9 +156,11 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 	return noticeLoopLimit, nil
 }
 
-// recordCalls writes one call log row per attempt, so a retried call shows as two calls. A call
-// that cannot be recorded is an error: nothing reaches the user that the log does not show.
-func (a *Agent) recordCalls(ctx context.Context, user identity.UserID, conversationID int64, resp model.CompletionResponse) error {
+// recordCalls writes one call log row per attempt, so a retried call shows as two calls, and
+// returns the ID of the last recorded call. A call that cannot be recorded is an error: nothing
+// reaches the user that the log does not show.
+func (a *Agent) recordCalls(ctx context.Context, user identity.UserID, conversationID int64, resp model.CompletionResponse) (*int64, error) {
+	var lastID *int64
 	for _, attempt := range resp.Attempts {
 		call := store.ModelCall{
 			ConversationID: conversationID,
@@ -170,7 +172,7 @@ func (a *Agent) recordCalls(ctx context.Context, user identity.UserID, conversat
 		}
 		var err error
 		if call.ResponseJSON, err = responseJSON(attempt.Response); err != nil {
-			return fmt.Errorf("encode response: %w", err)
+			return nil, fmt.Errorf("encode response: %w", err)
 		}
 		if attempt.Err != nil {
 			call.Status = store.CallStatusError
@@ -180,13 +182,15 @@ func (a *Agent) recordCalls(ctx context.Context, user identity.UserID, conversat
 			call.CompletionTokens = resp.Usage.CompletionTokens
 			call.CostUSD = resp.Usage.CostUSD
 		}
-		if err := a.store.RecordModelCall(ctx, user, call); err != nil {
-			return fmt.Errorf("record model call: %w", err)
+		id, err := a.store.RecordModelCall(ctx, user, call)
+		if err != nil {
+			return nil, fmt.Errorf("record model call: %w", err)
 		}
+		lastID = &id
 		slog.InfoContext(ctx, "model call finished",
 			"model", call.Model, "status", call.Status, "latency_ms", call.Latency.Milliseconds())
 	}
-	return nil
+	return lastID, nil
 }
 
 // responseJSON keeps a body as it is, wrapping one that is not JSON, such as a proxy's plain text
@@ -218,7 +222,7 @@ func appendToolRefusals(messages []model.Message, resp model.CompletionResponse)
 	return messages
 }
 
-func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, conversationID int64, messages []model.Message, resp model.CompletionResponse) ([]model.Message, error) {
+func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, conversationID int64, modelCallID *int64, messages []model.Message, resp model.CompletionResponse) ([]model.Message, error) {
 	messages = append(messages, model.Message{
 		Role:      model.RoleAssistant,
 		ToolCalls: resp.ToolCalls,
@@ -232,6 +236,7 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 			risk       tools.Risk
 			resultJSON json.RawMessage
 			errText    string
+			proposed   *store.PendingAction
 		)
 		if err != nil {
 			status = store.ToolCallStatusRejected
@@ -253,7 +258,7 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 				if proposeErr != nil {
 					return nil, fmt.Errorf("propose action: %w", proposeErr)
 				}
-				a.showCard(ctx, user, action)
+				proposed = &action
 				status = store.ToolCallStatusProposed
 				pending := "pending approval " + action.ID
 				resultJSON, _ = json.Marshal(pending)
@@ -272,12 +277,14 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 				}
 			}
 		}
+		latency := time.Since(start)
 		args := call.Arguments
 		if len(bytes.TrimSpace(args)) == 0 {
 			args = json.RawMessage("{}")
 		}
-		recordErr := a.store.RecordToolCall(ctx, user, store.ToolCall{
+		toolCallID, recordErr := a.store.RecordToolCall(ctx, user, store.ToolCall{
 			ConversationID: conversationID,
+			ModelCallID:    modelCallID,
 			ToolName:       call.Name,
 			ArgsJSON:       args,
 			Risk:           risk,
@@ -285,11 +292,20 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 			ResultJSON:     resultJSON,
 			Error:          errText,
 			StartedAt:      start,
-			Latency:        time.Since(start),
+			Latency:        latency,
 		})
 		if recordErr != nil {
 			return nil, fmt.Errorf("record tool call: %w", recordErr)
 		}
+		if proposed != nil {
+			if err := a.store.LinkActionToolCall(ctx, user, proposed.ID, toolCallID); err != nil {
+				return nil, fmt.Errorf("link action tool call: %w", err)
+			}
+			proposed.ToolCallID = &toolCallID
+			a.showCard(ctx, user, *proposed)
+		}
+		slog.InfoContext(ctx, "tool call finished",
+			"tool", call.Name, "risk", risk, "status", status, "latency_ms", latency.Milliseconds())
 		messages = append(messages, model.Message{
 			Role:       model.RoleTool,
 			ToolCallID: call.ID,
@@ -333,7 +349,7 @@ func (a *Agent) resendCards(ctx context.Context, user identity.UserID) {
 }
 
 // resendOutcomeNotices sends the user's undelivered outcome-unknown notices, to the chat each card
-// went to.
+// went to, or to the incoming message's chat when no card chat was recorded.
 func (a *Agent) resendOutcomeNotices(ctx context.Context, user identity.UserID) {
 	if a.opts.Notices == nil {
 		return
@@ -343,7 +359,11 @@ func (a *Agent) resendOutcomeNotices(ctx context.Context, user identity.UserID) 
 		slog.WarnContext(ctx, "unnotified outcomes not listed", "error", err)
 		return
 	}
+	chatID, hasChat := channel.ChatFrom(ctx)
 	for _, action := range waiting {
+		if action.NotifyChatID == 0 && hasChat {
+			action.NotifyChatID = chatID
+		}
 		approval.SendOutcomeNotice(ctx, a.store, a.opts.Notices, action)
 	}
 }

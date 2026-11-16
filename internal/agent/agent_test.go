@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +25,7 @@ import (
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
+	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
@@ -588,8 +591,8 @@ type brokenLog struct {
 	*testutil.FakeStore
 }
 
-func (brokenLog) RecordModelCall(context.Context, identity.UserID, store.ModelCall) error {
-	return errStoreDown
+func (brokenLog) RecordModelCall(context.Context, identity.UserID, store.ModelCall) (int64, error) {
+	return 0, errStoreDown
 }
 
 func TestUnrecordableCallReturnsError(t *testing.T) {
@@ -1475,5 +1478,176 @@ func TestNoticeNotShownToAnotherUser(t *testing.T) {
 		if n.chat == 900 || strings.Contains(n.text, "Dentist") {
 			t.Errorf("another user received the owner's notice: %+v", n)
 		}
+	}
+}
+
+func TestToolCallsLinkedToModelCallAndPendingAction(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewCurrentTimeToolWithClock(func() time.Time {
+		return time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	}))
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+
+	st := testutil.NewFakeStore()
+	gate := approval.New(st, reg, time.Hour)
+	var turns int
+	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+		turns++
+		if turns == 1 {
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{
+				{ID: "call_1", Name: "current_time", Arguments: json.RawMessage(`{}`)},
+				{ID: "call_2", Name: "notify_self", Arguments: json.RawMessage(`{"text": "Dentist at 3pm"}`)},
+			}}, nil
+		}
+		return model.CompletionResponse{Content: "Done."}, nil
+	}}
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = gate
+	opts.Cards = &recordingCards{}
+	a := New(client, st, opts)
+
+	sendInChat(t, a, 1, 900, "check time and notify me")
+
+	modelCalls := st.ModelCalls(1)
+	if len(modelCalls) != 2 || modelCalls[0].ID == 0 {
+		t.Fatalf("modelCalls = %+v, want 2 calls with non-zero IDs", modelCalls)
+	}
+	toolCalls := st.ToolCalls(1)
+	if len(toolCalls) != 2 {
+		t.Fatalf("got %d tool calls, want 2", len(toolCalls))
+	}
+	for i, tc := range toolCalls {
+		if tc.ModelCallID == nil || *tc.ModelCallID != modelCalls[0].ID {
+			t.Errorf("toolCalls[%d].ModelCallID = %v, want %d", i, tc.ModelCallID, modelCalls[0].ID)
+		}
+	}
+	pending := st.PendingActions(1)
+	if len(pending) != 1 || pending[0].ToolCallID == nil || *pending[0].ToolCallID != toolCalls[1].ID {
+		t.Fatalf("pending = %+v, want ToolCallID %d", pending, toolCalls[1].ID)
+	}
+
+	if _, err := gate.Decide(channel.WithChat(identity.WithUser(context.Background(), 1), 900), 1, pending[0].ID, approval.Approve); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	updated := st.ToolCalls(1)
+	if updated[1].Status != store.ToolCallStatusExecuted {
+		t.Errorf("updated critical tool call status = %q, want %q", updated[1].Status, store.ToolCallStatusExecuted)
+	}
+}
+
+type secretResultTool struct{}
+
+func (secretResultTool) Name() string        { return "secret_echo" }
+func (secretResultTool) Description() string { return "Returns a secret payload." }
+func (secretResultTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"secret":{"type":"string"}}}`)
+}
+func (secretResultTool) Risk() tools.Risk                        { return tools.RiskRead }
+func (secretResultTool) Preview(json.RawMessage) (string, error) { return "", nil }
+func (secretResultTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
+	return tools.Result{Content: "top-secret-result"}, nil
+}
+
+func TestToolDispatchStructuredLogOmitsArguments(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&logs, nil))))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	reg := tools.NewRegistry()
+	_ = reg.Register(secretResultTool{})
+	var turns int
+	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+		turns++
+		if turns == 1 {
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{{
+				ID:        "call_secret",
+				Name:      "secret_echo",
+				Arguments: json.RawMessage(`{"secret": "top-secret-arg"}`),
+			}}}, nil
+		}
+		return model.CompletionResponse{Content: "ok"}, nil
+	}}
+	st := testutil.NewFakeStore()
+	opts := testOptions()
+	opts.Tools = reg
+	a := New(client, st, opts)
+
+	ctx := obs.WithRequestID(identity.WithUser(context.Background(), 1), "req-42")
+	if _, err := a.HandleMessage(ctx, "private user prompt"); err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+
+	raw := logs.String()
+	for _, secret := range []string{"top-secret-arg", "top-secret-result", "private user prompt"} {
+		if strings.Contains(raw, secret) {
+			t.Errorf("logs leaked %q:\n%s", secret, raw)
+		}
+	}
+	var sawToolLog bool
+	for _, lineText := range strings.Split(strings.TrimSpace(raw), "\n") {
+		if lineText == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(lineText), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", lineText, err)
+		}
+		if entry["msg"] == "tool call finished" {
+			sawToolLog = true
+			if entry["request_id"] != "req-42" || entry["user_id"] != float64(1) ||
+				entry["tool"] != "secret_echo" || entry["risk"] != "read" || entry["status"] != "executed" {
+				t.Errorf("unexpected tool log fields: %v", entry)
+			}
+			if _, ok := entry["latency_ms"]; !ok {
+				t.Errorf("tool log missing latency_ms: %v", entry)
+			}
+		}
+	}
+	if !sawToolLog {
+		t.Errorf("missing 'tool call finished' log line; raw:\n%s", raw)
+	}
+}
+
+func TestUnrecordedChatNoticeDeliveredOnNextMessage(t *testing.T) {
+	reg := tools.NewRegistry()
+	_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+	st := testutil.NewFakeStore()
+	opts := testOptions()
+	opts.Tools = reg
+	opts.Approvals = approval.New(st, reg, time.Hour)
+	opts.Cards = &recordingCards{failures: 1, err: errors.New("telegram down")}
+	notices := &recordingNotices{}
+	opts.Notices = notices
+	a := New(proposingModel(), st, opts)
+
+	sendInChat(t, a, 1, 900, "notify me")
+	pending := st.PendingActions(1)
+	if len(pending) != 1 || pending[0].NotifyChatID != 0 {
+		t.Fatalf("pending = %+v, want NotifyChatID == 0 after failed card delivery", pending)
+	}
+	if _, err := st.UpdatePendingAction(identity.WithUser(context.Background(), 1), 1, pending[0].ID, store.PendingProposed,
+		store.PendingUpdate{State: store.PendingApproved, DecidedAt: &[]time.Time{time.Now().Add(-time.Hour)}[0]}); err != nil {
+		t.Fatalf("stall: %v", err)
+	}
+	if _, err := approval.SweepStale(context.Background(), st, notices, time.Now(), 5*time.Minute); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+	if len(notices.sent) != 0 {
+		t.Fatalf("SweepStale sent %+v without recorded chat, want none", notices.sent)
+	}
+
+	sendInChat(t, a, 1, 955, "hello from chat 955")
+	if len(notices.sent) != 1 || notices.sent[0].chat != 955 || !strings.Contains(notices.sent[0].text, "Notify yourself: Dentist at 3pm") {
+		t.Fatalf("notices = %+v, want one delivered to fallback chat 955", notices.sent)
+	}
+	if got := st.PendingActions(1)[0].OutcomeNoticeSentAt; got == nil {
+		t.Error("OutcomeNoticeSentAt = nil, want marked delivered")
+	}
+
+	sendInChat(t, a, 1, 955, "another message")
+	if len(notices.sent) != 1 {
+		t.Errorf("notices = %+v, want sent only once", notices.sent)
 	}
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
+	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/tools"
 )
@@ -232,20 +233,23 @@ func (g *Gate) Decide(ctx context.Context, user identity.UserID, actionID string
 
 // run executes an approved action and records the outcome.
 func (g *Gate) run(ctx context.Context, user identity.UserID, action store.PendingAction) (store.PendingAction, error) {
+	userCtx := identity.WithUser(ctx, user)
+	start := time.Now()
 	tool, err := g.tools.Lookup(action.ToolName)
 	if err != nil {
-		return g.fail(ctx, user, action.ID, fmt.Errorf("look up %s: %w", action.ToolName, err))
+		return g.fail(userCtx, user, action, time.Since(start), fmt.Errorf("look up %s: %w", action.ToolName, err))
 	}
-	res, err := tool.Execute(identity.WithUser(ctx, user), action.ArgsJSON)
+	res, err := tool.Execute(userCtx, action.ArgsJSON)
+	latency := time.Since(start)
 	if err != nil {
-		return g.fail(ctx, user, action.ID, fmt.Errorf("execute %s: %w", action.ToolName, err))
+		return g.fail(userCtx, user, action, latency, fmt.Errorf("execute %s: %w", action.ToolName, err))
 	}
 	resultJSON, err := json.Marshal(res.Content)
 	if err != nil {
-		return g.fail(ctx, user, action.ID, fmt.Errorf("encode result of %s: %w", action.ToolName, err))
+		return g.fail(userCtx, user, action, latency, fmt.Errorf("encode result of %s: %w", action.ToolName, err))
 	}
 	done := g.instant()
-	executed, err := g.move(ctx, user, action.ID, store.PendingApproved, store.PendingUpdate{
+	executed, err := g.move(userCtx, user, action.ID, store.PendingApproved, store.PendingUpdate{
 		State:      store.PendingExecuted,
 		ExecutedAt: &done,
 		ResultJSON: resultJSON,
@@ -253,14 +257,17 @@ func (g *Gate) run(ctx context.Context, user identity.UserID, action store.Pendi
 	if err != nil {
 		return store.PendingAction{}, err
 	}
-	g.note(ctx, user, fmt.Sprintf(noteExecuted, executed.ID))
+	g.completeToolCall(userCtx, user, action.ToolCallID, store.ToolCallStatusExecuted, resultJSON, "", latency)
+	slog.InfoContext(userCtx, "critical tool executed",
+		"action_id", executed.ID, "tool", action.ToolName, "latency_ms", latency.Milliseconds())
+	g.note(userCtx, user, fmt.Sprintf(noteExecuted, executed.ID))
 	return executed, nil
 }
 
 // fail marks an approved action failed and returns the cause as the error.
-func (g *Gate) fail(ctx context.Context, user identity.UserID, id string, cause error) (store.PendingAction, error) {
+func (g *Gate) fail(ctx context.Context, user identity.UserID, action store.PendingAction, latency time.Duration, cause error) (store.PendingAction, error) {
 	done := g.instant()
-	failed, err := g.move(ctx, user, id, store.PendingApproved, store.PendingUpdate{
+	failed, err := g.move(ctx, user, action.ID, store.PendingApproved, store.PendingUpdate{
 		State:      store.PendingFailed,
 		ExecutedAt: &done,
 		Error:      cause.Error(),
@@ -268,8 +275,20 @@ func (g *Gate) fail(ctx context.Context, user identity.UserID, id string, cause 
 	if err != nil {
 		return store.PendingAction{}, err
 	}
+	g.completeToolCall(ctx, user, action.ToolCallID, store.ToolCallStatusError, nil, cause.Error(), latency)
+	slog.WarnContext(ctx, "critical tool failed",
+		"action_id", failed.ID, "tool", action.ToolName, "error", cause)
 	g.note(ctx, user, fmt.Sprintf(noteFailed, failed.ID))
 	return failed, cause
+}
+
+func (g *Gate) completeToolCall(ctx context.Context, user identity.UserID, toolCallID *int64, status string, resultJSON json.RawMessage, errText string, latency time.Duration) {
+	if toolCallID == nil {
+		return
+	}
+	if err := g.store.CompleteToolCall(ctx, user, *toolCallID, status, resultJSON, errText, latency); err != nil {
+		slog.ErrorContext(ctx, "linked tool call not updated", "tool_call_id", *toolCallID, "error", err)
+	}
 }
 
 // note records an outcome in the user's open conversation.
@@ -317,6 +336,7 @@ func (g *Gate) instant() time.Time {
 // unknown, and the owner is told in the card's chat through out. A nil out sends no notices. A
 // failed action is never executed again.
 func SweepStale(ctx context.Context, st store.Store, out Notifier, now time.Time, staleAfter time.Duration) (int64, error) {
+	ctx = obs.WithRequestID(ctx, obs.NewRequestID())
 	users, err := st.ListActiveUsers(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list active users for approval sweep: %w", err)
@@ -335,6 +355,7 @@ func SweepStale(ctx context.Context, st store.Store, out Notifier, now time.Time
 			continue
 		}
 		for _, f := range failed {
+			slog.WarnContext(owner, "stale approval failed as outcome unknown", "action_id", f.ID)
 			recordNote(owner, st, f.UserID, fmt.Sprintf(noteUnknown, f.ID))
 			SendOutcomeNotice(owner, st, out, store.PendingAction{
 				ID: f.ID, UserID: f.UserID, Preview: f.Preview, NotifyChatID: f.ChatID,
@@ -362,7 +383,9 @@ func SendOutcomeNotice(ctx context.Context, st store.Store, out Notifier, action
 	}
 	if err := st.MarkOutcomeNoticed(ctx, action.UserID, action.ID, time.Now()); err != nil {
 		slog.ErrorContext(ctx, "outcome notice delivered but not recorded", "action_id", action.ID, "error", err)
+		return
 	}
+	slog.InfoContext(ctx, "outcome notice sent", "action_id", action.ID)
 }
 
 // RunSweeps runs SweepStale now and then every interval until ctx is done. A failed sweep is logged

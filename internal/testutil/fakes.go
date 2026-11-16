@@ -305,19 +305,19 @@ func (s *FakeStore) RecentMessages(ctx context.Context, user identity.UserID, co
 }
 
 // RecordModelCall implements store.Store.
-func (s *FakeStore) RecordModelCall(ctx context.Context, user identity.UserID, call store.ModelCall) error {
+func (s *FakeStore) RecordModelCall(ctx context.Context, user identity.UserID, call store.ModelCall) (int64, error) {
 	if err := store.RequireUser(ctx, user); err != nil {
-		return err
+		return 0, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.owns(user, call.ConversationID) {
-		return store.ErrConversationNotFound
+		return 0, store.ErrConversationNotFound
 	}
 	call.ID = s.id()
 	call.UserID = user
 	s.modelCalls = append(s.modelCalls, call)
-	return nil
+	return call.ID, nil
 }
 
 // ModelCalls returns the calls recorded for user.
@@ -334,18 +334,44 @@ func (s *FakeStore) ModelCalls(user identity.UserID) []store.ModelCall {
 }
 
 // RecordToolCall implements store.Store.
-func (s *FakeStore) RecordToolCall(ctx context.Context, user identity.UserID, call store.ToolCall) error {
+func (s *FakeStore) RecordToolCall(ctx context.Context, user identity.UserID, call store.ToolCall) (int64, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.owns(user, call.ConversationID) {
+		return 0, store.ErrConversationNotFound
+	}
+	if call.ModelCallID != nil {
+		if s.modelCallIndex(user, *call.ModelCallID) < 0 {
+			return 0, store.ErrModelCallNotFound
+		}
+		mcID := *call.ModelCallID
+		call.ModelCallID = &mcID
+	}
+	call.ID = s.id()
+	call.UserID = user
+	s.toolCalls = append(s.toolCalls, call)
+	return call.ID, nil
+}
+
+// CompleteToolCall implements store.Store.
+func (s *FakeStore) CompleteToolCall(ctx context.Context, user identity.UserID, id int64, status string, resultJSON json.RawMessage, errText string, latency time.Duration) error {
 	if err := store.RequireUser(ctx, user); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.owns(user, call.ConversationID) {
-		return store.ErrConversationNotFound
+	i := s.toolCallIndex(user, id)
+	if i < 0 {
+		return store.ErrToolCallNotFound
 	}
-	call.ID = s.id()
-	call.UserID = user
-	s.toolCalls = append(s.toolCalls, call)
+	tc := &s.toolCalls[i]
+	tc.Status = status
+	tc.ResultJSON = slices.Clone(resultJSON)
+	tc.Error = errText
+	tc.Latency = latency
 	return nil
 }
 
@@ -369,10 +395,54 @@ func (s *FakeStore) ProposeAction(ctx context.Context, user identity.UserID, act
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if action.ToolCallID != nil {
+		if s.toolCallIndex(user, *action.ToolCallID) < 0 {
+			return store.ErrToolCallNotFound
+		}
+		tcID := *action.ToolCallID
+		action.ToolCallID = &tcID
+	}
 	s.touchUser(user)
 	action.UserID = user
 	s.actions = append(s.actions, action)
 	return nil
+}
+
+// LinkActionToolCall implements store.Store.
+func (s *FakeStore) LinkActionToolCall(ctx context.Context, user identity.UserID, actionID string, toolCallID int64) error {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.actionIndex(user, actionID)
+	if i < 0 {
+		return store.ErrActionNotFound
+	}
+	if s.toolCallIndex(user, toolCallID) < 0 {
+		return store.ErrToolCallNotFound
+	}
+	id := toolCallID
+	s.actions[i].ToolCallID = &id
+	return nil
+}
+
+func (s *FakeStore) modelCallIndex(user identity.UserID, id int64) int {
+	for i, c := range s.modelCalls {
+		if c.ID == id && c.UserID == user {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *FakeStore) toolCallIndex(user identity.UserID, id int64) int {
+	for i, c := range s.toolCalls {
+		if c.ID == id && c.UserID == user {
+			return i
+		}
+	}
+	return -1
 }
 
 // PendingActions returns the pending actions proposed for user.

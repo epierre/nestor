@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/epierre/nestor/internal/approval"
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/store"
@@ -659,7 +660,7 @@ func TestRecordModelCall(t *testing.T) {
 	conversation := active(t, st, ctxA, a)
 	started := time.Now().Truncate(time.Microsecond)
 
-	err := st.RecordModelCall(ctxA, a, store.ModelCall{
+	_, err := st.RecordModelCall(ctxA, a, store.ModelCall{
 		ConversationID:   conversation.ID,
 		Model:            "cheap",
 		StartedAt:        started,
@@ -707,7 +708,7 @@ func TestRecordFailedModelCallKeepsNulls(t *testing.T) {
 	st, pool, a, _, ctxA, _ := twoScoped(t)
 	conversation := active(t, st, ctxA, a)
 
-	err := st.RecordModelCall(ctxA, a, store.ModelCall{
+	_, err := st.RecordModelCall(ctxA, a, store.ModelCall{
 		ConversationID: conversation.ID,
 		Model:          "cheap",
 		StartedAt:      time.Now(),
@@ -730,7 +731,7 @@ func TestRecordModelCallRoundsSubMillisecondLatencyUp(t *testing.T) {
 	st, pool, a, _, ctxA, _ := twoScoped(t)
 	conversation := active(t, st, ctxA, a)
 
-	err := st.RecordModelCall(ctxA, a, store.ModelCall{
+	_, err := st.RecordModelCall(ctxA, a, store.ModelCall{
 		ConversationID: conversation.ID,
 		Model:          "cheap",
 		StartedAt:      time.Now(),
@@ -751,7 +752,7 @@ func TestRecordModelCallOnOtherUsersConversationRejected(t *testing.T) {
 	st, _, a, b, ctxA, ctxB := twoScoped(t)
 	conversation := active(t, st, ctxA, a)
 
-	err := st.RecordModelCall(ctxB, b, store.ModelCall{
+	_, err := st.RecordModelCall(ctxB, b, store.ModelCall{
 		ConversationID: conversation.ID,
 		Model:          "cheap",
 		StartedAt:      time.Now(),
@@ -768,7 +769,7 @@ func TestCostPerUserFromCallLog(t *testing.T) {
 	st, pool, a, b, ctxA, ctxB := twoScoped(t)
 	record := func(ctx context.Context, user identity.UserID, conversation int64, cost *float64) {
 		t.Helper()
-		err := st.RecordModelCall(ctx, user, store.ModelCall{
+		_, err := st.RecordModelCall(ctx, user, store.ModelCall{
 			ConversationID: conversation,
 			Model:          "cheap",
 			StartedAt:      time.Now(),
@@ -866,7 +867,7 @@ func TestRecordToolCall(t *testing.T) {
 	started := time.Now().UTC().Truncate(time.Microsecond)
 
 	t.Run("tool call recorded with user", func(t *testing.T) {
-		err := st.RecordToolCall(ctxA, a, store.ToolCall{
+		_, err := st.RecordToolCall(ctxA, a, store.ToolCall{
 			ConversationID: conversation.ID,
 			ToolName:       "current_time",
 			ArgsJSON:       json.RawMessage(`{}`),
@@ -979,5 +980,146 @@ func TestListActiveUsersSkipsDisabledIdentities(t *testing.T) {
 	}
 	if want := []identity.UserID{ben}; !reflect.DeepEqual(got, want) {
 		t.Errorf("active users after re-adding Ben: %v, want %v", got, want)
+	}
+}
+
+func TestAuditLinksAndCompleteToolCall(t *testing.T) {
+	st, pool, a, b, ctxA, ctxB := twoScoped(t)
+	convA := active(t, st, ctxA, a)
+	convB := active(t, st, ctxB, b)
+	started := time.Now().UTC().Truncate(time.Microsecond)
+
+	mcID, err := st.RecordModelCall(ctxA, a, store.ModelCall{
+		ConversationID: convA.ID,
+		Model:          "cheap",
+		StartedAt:      started,
+		Status:         store.CallStatusOK,
+		RequestJSON:    json.RawMessage(`{}`),
+	})
+	if err != nil || mcID <= 0 {
+		t.Fatalf("RecordModelCall: id=%d err=%v", mcID, err)
+	}
+
+	tcID, err := st.RecordToolCall(ctxA, a, store.ToolCall{
+		ConversationID: convA.ID,
+		ModelCallID:    &mcID,
+		ToolName:       "notify_self",
+		ArgsJSON:       json.RawMessage(`{"text": "hi"}`),
+		Risk:           tools.RiskCritical,
+		Status:         store.ToolCallStatusProposed,
+		StartedAt:      started,
+	})
+	if err != nil || tcID <= 0 {
+		t.Fatalf("RecordToolCall: id=%d err=%v", tcID, err)
+	}
+
+	// User B cannot attach user A's model call to user B's tool call.
+	if _, err := st.RecordToolCall(ctxB, b, store.ToolCall{
+		ConversationID: convB.ID,
+		ModelCallID:    &mcID,
+		ToolName:       "notify_self",
+		ArgsJSON:       json.RawMessage(`{"text": "hi"}`),
+		Risk:           tools.RiskCritical,
+		Status:         store.ToolCallStatusProposed,
+		StartedAt:      started,
+	}); err == nil {
+		t.Fatal("cross-user model_call_id link succeeded, want error")
+	}
+
+	gate := approval.New(st, tools.NewRegistry(), time.Hour)
+	actionA, err := gate.Propose(ctxA, a, tools.NewNotifySelfTool(nil), json.RawMessage(`{"text": "hi"}`))
+	if err != nil {
+		t.Fatalf("Propose A: %v", err)
+	}
+	actionB, err := gate.Propose(ctxB, b, tools.NewNotifySelfTool(nil), json.RawMessage(`{"text": "other"}`))
+	if err != nil {
+		t.Fatalf("Propose B: %v", err)
+	}
+
+	if err := st.LinkActionToolCall(ctxA, a, actionA.ID, tcID); err != nil {
+		t.Fatalf("LinkActionToolCall: %v", err)
+	}
+	gotAction, err := st.GetPendingAction(ctxA, a, actionA.ID)
+	if err != nil {
+		t.Fatalf("GetPendingAction: %v", err)
+	}
+	if gotAction.ToolCallID == nil || *gotAction.ToolCallID != tcID {
+		t.Errorf("ToolCallID = %v, want %d", gotAction.ToolCallID, tcID)
+	}
+
+	// Cross-user LinkActionToolCall and CompleteToolCall are rejected.
+	if err := st.LinkActionToolCall(ctxB, b, actionA.ID, tcID); !errors.Is(err, store.ErrActionNotFound) {
+		t.Errorf("cross-user LinkActionToolCall on A's action = %v, want ErrActionNotFound", err)
+	}
+	if err := st.LinkActionToolCall(ctxB, b, actionB.ID, tcID); !errors.Is(err, store.ErrToolCallNotFound) {
+		t.Errorf("cross-user LinkActionToolCall with A's tool_call_id = %v, want ErrToolCallNotFound", err)
+	}
+	if err := st.CompleteToolCall(ctxB, b, tcID, store.ToolCallStatusExecuted, json.RawMessage(`"ok"`), "", time.Millisecond); !errors.Is(err, store.ErrToolCallNotFound) {
+		t.Errorf("cross-user CompleteToolCall = %v, want ErrToolCallNotFound", err)
+	}
+
+	if err := st.CompleteToolCall(ctxA, a, tcID, store.ToolCallStatusExecuted, json.RawMessage(`"sent"`), "", 200*time.Microsecond); err != nil {
+		t.Fatalf("CompleteToolCall: %v", err)
+	}
+	var got struct {
+		modelCallID *int64
+		status      string
+		resultJSON  *string
+		errText     string
+		latencyMS   int64
+	}
+	err = pool.QueryRow(context.Background(), `
+		SELECT model_call_id, status, result_json::text, error, latency_ms
+		FROM tool_calls WHERE id = $1`, tcID).Scan(
+		&got.modelCallID, &got.status, &got.resultJSON, &got.errText, &got.latencyMS)
+	if err != nil {
+		t.Fatalf("query tool call: %v", err)
+	}
+	if got.modelCallID == nil || *got.modelCallID != mcID {
+		t.Errorf("model_call_id = %v, want %d", got.modelCallID, mcID)
+	}
+	if got.status != store.ToolCallStatusExecuted {
+		t.Errorf("status = %q, want %q", got.status, store.ToolCallStatusExecuted)
+	}
+	if got.resultJSON == nil || *got.resultJSON != `"sent"` {
+		t.Errorf("result_json = %v, want '\"sent\"'", got.resultJSON)
+	}
+	if got.errText != "" || got.latencyMS != 1 {
+		t.Errorf("error=%q latency_ms=%d, want empty error and 1ms", got.errText, got.latencyMS)
+	}
+}
+
+func TestMigrate0007UpAndDown(t *testing.T) {
+	ctx := context.Background()
+	pool := migrated(t)
+
+	var chatCols int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'user_identities' AND column_name = 'chat_id'`).Scan(&chatCols); err != nil {
+		t.Fatalf("query columns: %v", err)
+	}
+	if chatCols != 0 {
+		t.Errorf("user_identities.chat_id column count = %d, want 0", chatCols)
+	}
+
+	ana, _ := twoUsers(t, pool)
+	conv := openConversation(t, pool, ana)
+	_, err := pool.Exec(ctx, `
+		INSERT INTO tool_calls (user_id, conversation_id, tool_name, args_json, risk, status, started_at)
+		VALUES ($1, $2, 'current_time', '{}', 'read', 'pending', now())`, ana, conv)
+	assertCode(t, err, checkViolation)
+
+	if err := MigrateDown(ctx, pool); err != nil {
+		t.Fatalf("MigrateDown: %v", err)
+	}
+	if got, want := tables(t, pool), []string{"schema_migrations"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("after down: tables %v, want %v", got, want)
+	}
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate after down: %v", err)
+	}
+	if got := tables(t, pool); !reflect.DeepEqual(got, appTables) {
+		t.Errorf("after up: tables %v, want %v", got, appTables)
 	}
 }
