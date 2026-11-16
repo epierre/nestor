@@ -6,7 +6,7 @@
 
 ## 2. Helper cleanup in tools and entrypoint
 
-- [ ] 2.1 Remove unused standalone `tools.Validate(t Tool, args)` from `internal/tools/registry.go` and wire `tools.RegisterDemoTools` in `cmd/nestor/main.go`. Prove with `TestDemoToolsOfferedOnlyWhenEnabled` in `cmd/nestor/main_test.go` and `TestRegistry` / `TestDemoTools` in `internal/tools/`.
+- [x] 2.1 Remove unused standalone `tools.Validate(t Tool, args)` from `internal/tools/registry.go` and wire `tools.RegisterDemoTools` in `cmd/nestor/main.go`. Prove with `TestDemoToolsOfferedOnlyWhenEnabled` in `cmd/nestor/main_test.go` and `TestRegistry` / `TestDemoTools` in `internal/tools/`.
 
 ## 3. Approval execution audit and structured sweep logs
 

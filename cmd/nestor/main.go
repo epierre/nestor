@@ -104,10 +104,7 @@ func toolRegistry(enableDemo bool, notifier chatNotifier, st store.Store, loc *t
 	for _, tool := range reminders.Tools(st, loc, time.Now) {
 		_ = reg.Register(tool)
 	}
-	if enableDemo {
-		_ = reg.Register(tools.NewCurrentTimeTool())
-		_ = reg.Register(tools.NewNotifySelfTool(notifySelf(notifier)))
-	}
+	_ = tools.RegisterDemoTools(reg, enableDemo, notifySelf(notifier))
 	return reg
 }
 

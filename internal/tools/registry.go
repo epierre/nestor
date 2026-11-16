@@ -134,38 +134,6 @@ func (r *Registry) Validate(name string, args json.RawMessage) error {
 	return nil
 }
 
-// Validate checks that args match a tool's JSON Schema.
-func Validate(t Tool, args json.RawMessage) error {
-	rawSchema := t.Schema()
-	if len(bytes.TrimSpace(rawSchema)) == 0 {
-		return nil
-	}
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(rawSchema))
-	if err != nil {
-		return fmt.Errorf("invalid tool schema: %w", err)
-	}
-	c := jsonschema.NewCompiler()
-	url := fmt.Sprintf("schema://%s.json", t.Name())
-	if err := c.AddResource(url, doc); err != nil {
-		return fmt.Errorf("add schema resource: %w", err)
-	}
-	sch, err := c.Compile(url)
-	if err != nil {
-		return fmt.Errorf("compile tool schema: %w", err)
-	}
-	if len(bytes.TrimSpace(args)) == 0 {
-		args = json.RawMessage("{}")
-	}
-	val, err := jsonschema.UnmarshalJSON(bytes.NewReader(args))
-	if err != nil {
-		return fmt.Errorf("%w: invalid JSON: %v", ErrValidation, err)
-	}
-	if err := sch.Validate(val); err != nil {
-		return fmt.Errorf("%w: %v", ErrValidation, err)
-	}
-	return nil
-}
-
 // AgentView wraps a Registry to enforce that critical tools cannot be executed by the agent.
 type AgentView struct {
 	reg *Registry
