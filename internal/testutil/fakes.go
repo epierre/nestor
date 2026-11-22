@@ -133,6 +133,7 @@ type FakeStore struct {
 	actions       []store.PendingAction
 	tasks         []store.Task
 	reminders     []store.Reminder
+	credentials   map[credentialKey]store.Credential
 	identities    map[identityKey]identity.UserID
 	knownUsers    map[identity.UserID]bool
 	disabledUsers map[identity.UserID]bool

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/epierre/nestor/internal/credentials"
 )
 
 const (
@@ -41,6 +43,9 @@ type Config struct {
 	Timezone string
 	// ApprovalTTL is how long a proposed action waits for its user's decision.
 	ApprovalTTL time.Duration
+	// CredentialsKey is the AES-256 key that encrypts per-user credentials, decoded from
+	// CREDENTIALS_KEY. It is a secret and must not be logged. Nil when unset.
+	CredentialsKey []byte
 	// ApprovalStaleAfter is how long an action may sit approved before it is failed as outcome
 	// unknown.
 	ApprovalStaleAfter time.Duration
@@ -126,6 +131,14 @@ func Load(getenv func(string) string) (Config, error) {
 			errs = append(errs, fmt.Errorf("ALLOWED_TELEGRAM_USERS: %w", err))
 		}
 		cfg.AllowedTelegramUsers = users
+	}
+
+	if raw := get("CREDENTIALS_KEY"); raw != "" {
+		key, err := credentials.ParseKey(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("CREDENTIALS_KEY: %w", err))
+		}
+		cfg.CredentialsKey = key
 	}
 
 	if err := errors.Join(errs...); err != nil {

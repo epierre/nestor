@@ -26,6 +26,7 @@ services:
       APPROVAL_TTL: ${APPROVAL_TTL:-}
       APPROVAL_STALE_AFTER: ${APPROVAL_STALE_AFTER:-}
       TIMEZONE: ${TIMEZONE:-}
+      CREDENTIALS_KEY: ${CREDENTIALS_KEY:-}
     networks:
       - default
       - database

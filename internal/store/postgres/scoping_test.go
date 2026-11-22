@@ -142,6 +142,13 @@ func TestUnscopedCallReturnsError(t *testing.T) {
 				_, err := st.MarkReminderDelivered(ctx, user, 1, now)
 				return err
 			}},
+			{"SetCredential", func(ctx context.Context) error {
+				return st.SetCredential(ctx, user, "todoist_token", []byte("ct"), []byte("nonce"))
+			}},
+			{"GetCredential", func(ctx context.Context) error {
+				_, err := st.GetCredential(ctx, user, "todoist_token")
+				return err
+			}},
 		}
 	}
 

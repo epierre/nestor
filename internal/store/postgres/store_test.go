@@ -29,7 +29,7 @@ const (
 )
 
 var appTables = []string{
-	"conversations", "messages", "model_calls", "pending_actions", "reminders", "schema_migrations", "tasks", "tool_calls", "user_identities", "users",
+	"conversations", "messages", "model_calls", "pending_actions", "reminders", "schema_migrations", "tasks", "tool_calls", "user_credentials", "user_identities", "users",
 }
 
 func tables(t *testing.T, pool *pgxpool.Pool) []string {

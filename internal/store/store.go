@@ -165,6 +165,16 @@ var ErrTaskNotFound = errors.New("task not found")
 // no longer pending (delivered or cancelled). These are not told apart.
 var ErrReminderNotFound = errors.New("reminder not found")
 
+// ErrCredentialNotFound is returned when user has no stored credential under that key.
+var ErrCredentialNotFound = errors.New("credential not found")
+
+// Credential is an encrypted per-user secret as stored. Open it with internal/credentials.
+type Credential struct {
+	Ciphertext []byte
+	Nonce      []byte
+	UpdatedAt  time.Time
+}
+
 // Task is a task the owner keeps. DueDate is a calendar day, YYYY-MM-DD, or empty for none.
 type Task struct {
 	ID        int64
@@ -260,6 +270,11 @@ type Store interface {
 	// MarkReminderDelivered records that a pending reminder was sent. It reports false when the
 	// reminder was no longer pending.
 	MarkReminderDelivered(ctx context.Context, user identity.UserID, id int64, at time.Time) (bool, error)
+	// SetCredential stores the encrypted credential key for user, replacing any earlier value. The
+	// store never sees plaintext; callers encrypt with internal/credentials first.
+	SetCredential(ctx context.Context, user identity.UserID, key string, ciphertext, nonce []byte) error
+	// GetCredential returns user's encrypted credential key, or ErrCredentialNotFound.
+	GetCredential(ctx context.Context, user identity.UserID, key string) (Credential, error)
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's

@@ -36,7 +36,13 @@ const (
 
 func main() {
 	slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(os.Stdout, nil))))
-	if err := run(); err != nil {
+	var err error
+	if len(os.Args) > 1 && os.Args[1] == "credentials" {
+		err = runCredentials(context.Background(), os.Args[2:], os.Getenv, os.Stdin, os.Stdout)
+	} else {
+		err = run()
+	}
+	if err != nil {
 		slog.Error("nestor stopped", "error", err)
 		os.Exit(1)
 	}
