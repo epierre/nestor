@@ -31,12 +31,30 @@ services:
     networks:
       - default
       - database
+      - mcp
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     mem_limit: 256m
+
+  # Reference MCP server (first-party, read-only, no credentials). It is on the mcp network only:
+  # it can answer Nestor and reach nothing else.
+  mcp-timezone:
+    build:
+      context: ..
+      dockerfile: deploy/mcp-timezone.Dockerfile
+    restart: unless-stopped
+    user: "65532:65532"
+    networks:
+      - mcp
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
 
   postgres:
     image: pgvector/pgvector:0.8.6-pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
@@ -82,6 +100,9 @@ services:
 networks:
   # No route out, and LiteLLM is not attached: only Nestor can reach Postgres.
   database:
+    internal: true
+  # No route out, and neither Postgres nor LiteLLM is attached: MCP servers can reach only Nestor.
+  mcp:
     internal: true
 
 volumes:

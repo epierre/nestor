@@ -94,6 +94,7 @@ Changes 9 and 10 depend only on change 2 and can be pulled earlier.
 
 ```
 cmd/nestor/          Entrypoint
+cmd/mcp-timezone/    Reference MCP server: read-only time zone tools
 internal/            Application packages
 evals/               On-demand real-model evaluation suites (-tags eval)
 deploy/              Docker Compose stack and LiteLLM configuration
@@ -135,6 +136,8 @@ Set these in `deploy/.env`, which git ignores (validated by [`internal/config/co
 | `APPROVAL_TTL` | No | How long a proposed critical action waits for a tap before expiring. Default `24h` |
 | `APPROVAL_STALE_AFTER` | No | How long an approved action may run before a sweep marks its outcome unknown and notifies the owner. Default `5m` |
 | `TIMEZONE` | No | IANA timezone for local clock context, tasks and reminders. Default `Europe/Zurich` |
+| `CREDENTIALS_KEY` | No | Base64 of 32 random bytes (`openssl rand -base64 32`) that encrypts per-user MCP credentials. Needed to store one with `nestor credentials set` |
+| `ADMIN_USER_ID` | No | Internal user ID (not a Telegram ID) who receives operational alerts, such as an MCP tool waiting for `nestor mcp approve`. Unset: alerts are only logged |
 
 ### Using the bot
 
@@ -205,6 +208,24 @@ docker compose -f deploy/docker-compose.yml logs nestor | grep '"request_id":"TH
 8. Send a voice message. You get the text-only notice and no new `model_calls` row.
 9. From an account not on the allowlist, message the bot. Nothing comes back, and the logs show
    `ignored message from unknown sender`.
+
+### MCP server isolation check
+
+MCP server containers sit on the internal `mcp` network, which has no route out and which neither
+Postgres nor LiteLLM joins. `go test ./deploy/` checks this in the Compose file. To check it on a
+running stack, start a throwaway container on that network (the server images have no shell):
+
+```sh
+docker run --rm --network nestor_mcp busybox:1.36 sh -c '
+for target in "mcp-timezone 8080" "postgres 5432" "1.1.1.1 443"; do
+  set -- $target
+  if nc -z -w 3 "$1" "$2" 2>/dev/null; then echo "REACHABLE   $1:$2"; else echo "unreachable $1:$2"; fi
+done'
+```
+
+Expected: `mcp-timezone:8080` reachable, `postgres:5432` and `1.1.1.1:443` unreachable. Then
+`docker inspect nestor-mcp-timezone-1 --format '{{.Config.User}} {{.HostConfig.ReadonlyRootfs}}'`
+prints `65532:65532 true`.
 
 ## Contributing
 
