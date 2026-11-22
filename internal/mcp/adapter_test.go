@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/epierre/nestor/internal/mcp/config"
 	"github.com/epierre/nestor/internal/tools"
@@ -29,6 +31,17 @@ func fakeServer(t *testing.T) *Session {
 	srv.AddTool(&sdk.Tool{Name: "delete_task", InputSchema: object,
 		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true}}, ok)
 	srv.AddTool(&sdk.Tool{Name: "delete_project", InputSchema: object}, ok)
+	srv.AddTool(&sdk.Tool{Name: "slow", InputSchema: object},
+		func(ctx context.Context, _ *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+	srv.AddTool(&sdk.Tool{Name: "big", InputSchema: object},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{
+				&sdk.TextContent{Text: strings.Repeat("é", 1<<20)},
+			}}, nil
+		})
 
 	serverT, clientT := sdk.NewInMemoryTransports()
 	if _, err := srv.Connect(ctx, serverT, nil); err != nil {
@@ -44,6 +57,20 @@ func fakeServer(t *testing.T) *Session {
 
 func weatherServer(tools map[string]config.Tool) config.Server {
 	return config.Server{Name: "weather", Transport: "http", Tools: tools}
+}
+
+// executeOne registers the one tool in server, runs it and returns its result.
+func executeOne(t *testing.T, server config.Server, name string) (tools.Result, error) {
+	t.Helper()
+	reg := tools.NewRegistry()
+	if err := RegisterTools(context.Background(), reg, server, fakeServer(t)); err != nil {
+		t.Fatalf("RegisterTools: %v", err)
+	}
+	tool, err := reg.Lookup(server.Name + "__" + name)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	return tool.Execute(context.Background(), json.RawMessage(`{}`))
 }
 
 // fakeBuiltin is a built-in tool used to provoke a name clash.
@@ -162,5 +189,34 @@ func TestExecuteForwardsCall(t *testing.T) {
 	}
 	if res.Content != "ok" {
 		t.Errorf("Execute content = %q, want %q", res.Content, "ok")
+	}
+}
+
+func TestExecuteTimeoutYieldsError(t *testing.T) {
+	server := weatherServer(map[string]config.Tool{"slow": {Risk: tools.RiskRead}})
+	server.Timeout = 50 * time.Millisecond
+
+	_, err := executeOne(t, server, "slow")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("Execute error = %v, want a timeout error", err)
+	}
+}
+
+func TestExecuteTruncatesOversizedResult(t *testing.T) {
+	server := weatherServer(map[string]config.Tool{"big": {Risk: tools.RiskRead}})
+	server.MaxResultBytes = 1024
+
+	res, err := executeOne(t, server, "big")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(res.Content, "[truncated") {
+		t.Errorf("result has no truncation marker: %.80q...", res.Content)
+	}
+	if n := len(res.Content); n > 1024+100 {
+		t.Errorf("result is %d bytes, want close to the 1024 byte cap", n)
+	}
+	if !utf8.ValidString(res.Content) {
+		t.Error("truncation split a multi-byte character")
 	}
 }
