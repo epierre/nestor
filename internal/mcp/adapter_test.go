@@ -72,8 +72,8 @@ func weatherServer(tools map[string]config.Tool) config.Server {
 func executeOne(t *testing.T, server config.Server, name string) (tools.Result, error) {
 	t.Helper()
 	reg := tools.NewRegistry()
-	if err := RegisterTools(context.Background(), reg, newPins(), server, fakeServer(t)); err != nil {
-		t.Fatalf("RegisterTools: %v", err)
+	if err := approved(reg).Register(context.Background(), server, fakeServer(t)); err != nil {
+		t.Fatalf("Register: %v", err)
 	}
 	tool, err := reg.Lookup(server.Name + "__" + name)
 	if err != nil {
@@ -122,15 +122,15 @@ func TestRegisterAllowlistedTools(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := tools.NewRegistry()
-			err := RegisterTools(ctx, reg, newPins(), tt.server, fakeServer(t))
+			err := approved(reg).Register(ctx, tt.server, fakeServer(t))
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("RegisterTools error = %v, want containing %q", err, tt.wantErr)
+					t.Fatalf("Register error = %v, want containing %q", err, tt.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("RegisterTools: %v", err)
+				t.Fatalf("Register: %v", err)
 			}
 			for _, name := range tt.want {
 				if _, err := reg.Lookup(name); err != nil {
@@ -147,8 +147,8 @@ func TestRegisterAllowlistedTools(t *testing.T) {
 func TestRiskFromConfigIgnoresAnnotation(t *testing.T) {
 	reg := tools.NewRegistry()
 	server := weatherServer(map[string]config.Tool{"delete_task": {Risk: tools.RiskCritical}})
-	if err := RegisterTools(context.Background(), reg, newPins(), server, fakeServer(t)); err != nil {
-		t.Fatalf("RegisterTools: %v", err)
+	if err := approved(reg).Register(context.Background(), server, fakeServer(t)); err != nil {
+		t.Fatalf("Register: %v", err)
 	}
 
 	tool, err := reg.Lookup("weather__delete_task")
@@ -168,9 +168,9 @@ func TestNameClashWithBuiltin(t *testing.T) {
 	}
 	server := weatherServer(map[string]config.Tool{"get_tasks": {Risk: tools.RiskRead}})
 
-	err := RegisterTools(context.Background(), reg, newPins(), server, fakeServer(t))
+	err := approved(reg).Register(context.Background(), server, fakeServer(t))
 	if !errors.Is(err, tools.ErrAlreadyExists) {
-		t.Fatalf("RegisterTools error = %v, want ErrAlreadyExists", err)
+		t.Fatalf("Register error = %v, want ErrAlreadyExists", err)
 	}
 	got, err := reg.Lookup("weather__get_tasks")
 	if err != nil {
@@ -184,8 +184,8 @@ func TestNameClashWithBuiltin(t *testing.T) {
 func TestExecuteForwardsCall(t *testing.T) {
 	reg := tools.NewRegistry()
 	server := weatherServer(map[string]config.Tool{"get_tasks": {Risk: tools.RiskRead}})
-	if err := RegisterTools(context.Background(), reg, newPins(), server, fakeServer(t)); err != nil {
-		t.Fatalf("RegisterTools: %v", err)
+	if err := approved(reg).Register(context.Background(), server, fakeServer(t)); err != nil {
+		t.Fatalf("Register: %v", err)
 	}
 	tool, err := reg.Lookup("weather__get_tasks")
 	if err != nil {
@@ -238,8 +238,8 @@ func TestCriticalToolCreatesPendingAction(t *testing.T) {
 	st := testutil.NewFakeStore()
 	reg := tools.NewRegistry()
 	server := weatherServer(map[string]config.Tool{"delete_task": {Risk: tools.RiskCritical}})
-	if err := RegisterTools(ctx, reg, newPins(), server, fakeServer(t)); err != nil {
-		t.Fatalf("RegisterTools: %v", err)
+	if err := approved(reg).Register(ctx, server, fakeServer(t)); err != nil {
+		t.Fatalf("Register: %v", err)
 	}
 	tool, err := reg.Lookup("weather__delete_task")
 	if err != nil {
@@ -281,8 +281,8 @@ func TestEnabledForUsers(t *testing.T) {
 			reg := tools.NewRegistry()
 			server := weatherServer(map[string]config.Tool{"get_tasks": {Risk: tools.RiskRead}})
 			server.Users = tt.users
-			if err := RegisterTools(ctx, reg, newPins(), server, fakeServer(t)); err != nil {
-				t.Fatalf("RegisterTools: %v", err)
+			if err := approved(reg).Register(ctx, server, fakeServer(t)); err != nil {
+				t.Fatalf("Register: %v", err)
 			}
 			tool, err := reg.Lookup("weather__get_tasks")
 			if err != nil {
@@ -370,8 +370,8 @@ func TestEachUserServedWithOwnToken(t *testing.T) {
 	conn := NewUserConnector(server, st, sealer)
 	t.Cleanup(conn.Close)
 	reg := tools.NewRegistry()
-	if err := RegisterUserTools(identity.WithUser(context.Background(), 1), reg, newPins(), server, conn); err != nil {
-		t.Fatalf("RegisterUserTools: %v", err)
+	if err := approved(reg).RegisterUser(identity.WithUser(context.Background(), 1), server, conn); err != nil {
+		t.Fatalf("RegisterUser: %v", err)
 	}
 	tool, err := reg.Lookup("todoist__whoami")
 	if err != nil {
@@ -412,8 +412,8 @@ func TestMissingCredentialHidesTools(t *testing.T) {
 	conn := NewUserConnector(server, st, sealer)
 	t.Cleanup(conn.Close)
 	reg := tools.NewRegistry()
-	if err := RegisterUserTools(identity.WithUser(context.Background(), 1), reg, newPins(), server, conn); err != nil {
-		t.Fatalf("RegisterUserTools: %v", err)
+	if err := approved(reg).RegisterUser(identity.WithUser(context.Background(), 1), server, conn); err != nil {
+		t.Fatalf("RegisterUser: %v", err)
 	}
 
 	offered := func(user identity.UserID) bool {

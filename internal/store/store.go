@@ -168,8 +168,21 @@ var ErrReminderNotFound = errors.New("reminder not found")
 // ErrCredentialNotFound is returned when user has no stored credential under that key.
 var ErrCredentialNotFound = errors.New("credential not found")
 
-// ToolPin is the description and input schema of an MCP tool as recorded when it was first
-// trusted. It is host-wide configuration, not user data. Hash covers both description and schema.
+// ErrToolPinNotFound is returned when approving a tool that has never been seen on connect.
+var ErrToolPinNotFound = errors.New("tool pin not found")
+
+// ToolPinState is what is known about one MCP tool: the version an administrator approved, if
+// any, and the latest version seen on connect. NewlySeen is set when the seen version changed with
+// the call that returned it, so the administrator is told once per version.
+type ToolPinState struct {
+	Approved  *ToolPin
+	Seen      ToolPin
+	NewlySeen bool
+}
+
+// ToolPin is one version of an MCP tool's description and input schema. It is host-wide
+// configuration, not user data. Hash covers both description and schema. ApprovedAt is set only
+// on an approved version.
 type ToolPin struct {
 	Server      string
 	Tool        string
@@ -284,6 +297,9 @@ type Store interface {
 	// SetCredential stores the encrypted credential key for user, replacing any earlier value. The
 	// store never sees plaintext; callers encrypt with internal/credentials first.
 	SetCredential(ctx context.Context, user identity.UserID, key string, ciphertext, nonce []byte) error
+	// ExternalIdentity returns user's active identity on platform, such as a Telegram user ID, or
+	// ErrIdentityNotFound. Only the channel for that platform may use it.
+	ExternalIdentity(ctx context.Context, user identity.UserID, platform string) (string, error)
 	// GetCredential returns user's encrypted credential key, or ErrCredentialNotFound.
 	GetCredential(ctx context.Context, user identity.UserID, key string) (Credential, error)
 }

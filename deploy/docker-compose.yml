@@ -27,6 +27,7 @@ services:
       APPROVAL_STALE_AFTER: ${APPROVAL_STALE_AFTER:-}
       TIMEZONE: ${TIMEZONE:-}
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:-}
+      ADMIN_USER_ID: ${ADMIN_USER_ID:-}
     networks:
       - default
       - database

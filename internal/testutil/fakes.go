@@ -236,6 +236,26 @@ func (s *FakeStore) ResolveIdentity(_ context.Context, platform, externalID stri
 	return user, nil
 }
 
+// ExternalIdentity implements store.Store. The fake has no disabled identities.
+func (s *FakeStore) ExternalIdentity(ctx context.Context, user identity.UserID, platform string) (string, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []string
+	for key, u := range s.identities {
+		if u == user && key.platform == platform {
+			found = append(found, key.externalID)
+		}
+	}
+	if len(found) == 0 {
+		return "", store.ErrIdentityNotFound
+	}
+	slices.Sort(found)
+	return found[0], nil
+}
+
 // ActiveConversation implements store.Store.
 func (s *FakeStore) ActiveConversation(ctx context.Context, user identity.UserID) (store.Conversation, error) {
 	if err := store.RequireUser(ctx, user); err != nil {

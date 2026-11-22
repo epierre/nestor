@@ -30,11 +30,32 @@ const (
 	defaultMaxResultBytes = 64 << 10
 )
 
-// PinStore records the description and schema an MCP tool was first trusted with.
-// postgres.Store implements it.
+// PinStore records the versions of each MCP tool seen on connect and the one an administrator
+// approved. postgres.Store implements it.
 type PinStore interface {
-	// PinTool stores pin unless the tool is already pinned, and returns the stored pin.
-	PinTool(ctx context.Context, pin store.ToolPin) (store.ToolPin, error)
+	RecordToolSeen(ctx context.Context, live store.ToolPin) (store.ToolPinState, error)
+}
+
+// Alerter tells the host administrator about MCP tools that wait for approval.
+type Alerter interface {
+	AlertAdmin(ctx context.Context, text string) error
+}
+
+// UserNotifier sends a message to one user. telegram.Channel implements it.
+type UserNotifier interface {
+	NotifyUser(ctx context.Context, user identity.UserID, text string) error
+}
+
+// AdminAlerts sends MCP alerts to the host administrator, the user in ADMIN_USER_ID. The role is
+// for alerts only and grants no access to other users' data.
+type AdminAlerts struct {
+	Notifier UserNotifier
+	Admin    identity.UserID
+}
+
+// AlertAdmin implements Alerter.
+func (a AdminAlerts) AlertAdmin(ctx context.Context, text string) error {
+	return a.Notifier.NotifyUser(ctx, a.Admin, text)
 }
 
 // connector gives the session a call runs on.
@@ -52,28 +73,35 @@ type fixedSession struct{ s *Session }
 
 func (f fixedSession) sessionFor(context.Context) (*Session, error) { return f.s, nil }
 
-// RegisterTools adds every tool allowlisted for server to reg, named <server>__<tool>, with every
-// call running on s. Risk comes from the configuration; annotations the server sends are ignored.
-// A tool that the server does not offer, or whose name is already registered, is an error.
-func RegisterTools(ctx context.Context, reg *tools.Registry, pins PinStore, server config.Server, s *Session) error {
-	return registerTools(ctx, reg, pins, server, s, fixedSession{s})
+// Registrar adds the allowlisted tools of MCP servers to Registry, named <server>__<tool>. A tool
+// is registered only while the version it is served with is the one an administrator approved;
+// the model is sent the approved description and schema. Risk comes from the configuration, and
+// annotations the server sends are ignored. Alerts may be nil, in which case alerts are only
+// logged.
+type Registrar struct {
+	Registry *tools.Registry
+	Pins     PinStore
+	Alerts   Alerter
 }
 
-// RegisterUserTools is RegisterTools for a per_user server with header delivery: each call runs on
-// the session of the user in its context. The tool list is read as the user in ctx, who must have
-// a stored credential.
-func RegisterUserTools(ctx context.Context, reg *tools.Registry, pins PinStore, server config.Server, users *UserConnector) error {
+// Register adds server's approved tools, with every call running on s. A tool that the server
+// does not offer, or whose name is already registered, is an error.
+func (r *Registrar) Register(ctx context.Context, server config.Server, s *Session) error {
+	return r.register(ctx, server, s, fixedSession{s})
+}
+
+// RegisterUser is Register for a per_user server with header delivery: each call runs on the
+// session of the user in its context. The tool list is read as the user in ctx, who must have a
+// stored credential.
+func (r *Registrar) RegisterUser(ctx context.Context, server config.Server, users *UserConnector) error {
 	listing, err := users.sessionFor(ctx)
 	if err != nil {
 		return fmt.Errorf("server %q: %w", server.Name, err)
 	}
-	return registerTools(ctx, reg, pins, server, listing, users)
+	return r.register(ctx, server, listing, users)
 }
 
-// registerTools pins each allowlisted tool on first sight and registers it with the pinned
-// description and schema. A tool whose live description or schema no longer matches its pin is
-// left out and logged; the other tools of the server are still registered.
-func registerTools(ctx context.Context, reg *tools.Registry, pins PinStore, server config.Server, listing *Session, conn connector) error {
+func (r *Registrar) register(ctx context.Context, server config.Server, listing *Session, conn connector) error {
 	offered, err := listing.ListTools(ctx)
 	if err != nil {
 		return fmt.Errorf("server %q: %w", server.Name, err)
@@ -99,13 +127,24 @@ func registerTools(ctx context.Context, reg *tools.Registry, pins PinStore, serv
 			SchemaJSON:  schema,
 			Hash:        pinHash(remote.Description, schema),
 		}
-		pin, err := pins.PinTool(ctx, live)
+		state, err := r.Pins.RecordToolSeen(ctx, live)
 		if err != nil {
-			return fmt.Errorf("server %q tool %q: pin: %w", server.Name, name, err)
+			return fmt.Errorf("server %q tool %q: record pin: %w", server.Name, name, err)
 		}
-		if pin.Hash != live.Hash {
+		pin := state.Approved
+		switch {
+		case pin == nil:
+			slog.WarnContext(ctx, "mcp tool waiting for approval", "server", server.Name, "tool", name)
+			if state.NewlySeen {
+				r.alert(ctx, newToolText(live))
+			}
+			continue
+		case pin.Hash != live.Hash:
 			slog.ErrorContext(ctx, "mcp tool pin mismatch: tool disabled until re-approved",
 				"server", server.Name, "tool", name, "pinned_hash", pin.Hash, "live_hash", live.Hash)
+			if state.NewlySeen {
+				r.alert(ctx, changedToolText(*pin, live))
+			}
 			continue
 		}
 		adapted := &adapterTool{
@@ -120,7 +159,7 @@ func registerTools(ctx context.Context, reg *tools.Registry, pins PinStore, serv
 			maxBytes:    orDefault(server.MaxResultBytes, defaultMaxResultBytes),
 			users:       server.Users,
 		}
-		if err := reg.Register(adapted); err != nil {
+		if err := r.Registry.Register(adapted); err != nil {
 			return fmt.Errorf("register %q: %w", adapted.name, err)
 		}
 	}
@@ -213,6 +252,35 @@ func capResult(text string, max int) (string, bool) {
 		cut--
 	}
 	return fmt.Sprintf("%s\n[truncated: %d bytes omitted]", text[:cut], len(text)-cut), true
+}
+
+func (r *Registrar) alert(ctx context.Context, text string) {
+	if r.Alerts == nil {
+		return
+	}
+	if err := r.Alerts.AlertAdmin(ctx, text); err != nil {
+		slog.ErrorContext(ctx, "mcp admin alert not sent", "error", err)
+	}
+}
+
+// newToolText asks the administrator to review a tool seen for the first time.
+func newToolText(live store.ToolPin) string {
+	return fmt.Sprintf("New MCP tool %s%s%s is waiting for approval.\n\nDescription:\n%s\n\n%s",
+		live.Server, namespaceSep, live.Tool, live.Description, approveHint(live))
+}
+
+// changedToolText shows the administrator what changed in a tool that is now disabled.
+func changedToolText(approved, live store.ToolPin) string {
+	text := fmt.Sprintf("MCP tool %s%s%s changed and is disabled until re-approved.\n\nOld description:\n%s\n\nNew description:\n%s\n\n",
+		live.Server, namespaceSep, live.Tool, approved.Description, live.Description)
+	if approved.Description == live.Description {
+		text += "Only the input schema changed.\n\n"
+	}
+	return text + approveHint(live)
+}
+
+func approveHint(live store.ToolPin) string {
+	return fmt.Sprintf("Approve after review with: nestor mcp approve %s %s", live.Server, live.Tool)
 }
 
 // pinHash identifies a tool's description and schema together.

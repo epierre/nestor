@@ -149,6 +149,10 @@ func TestUnscopedCallReturnsError(t *testing.T) {
 				_, err := st.GetCredential(ctx, user, "todoist_token")
 				return err
 			}},
+			{"ExternalIdentity", func(ctx context.Context) error {
+				_, err := st.ExternalIdentity(ctx, user, "telegram")
+				return err
+			}},
 		}
 	}
 

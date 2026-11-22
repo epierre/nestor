@@ -37,9 +37,12 @@ const (
 func main() {
 	slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(os.Stdout, nil))))
 	var err error
-	if len(os.Args) > 1 && os.Args[1] == "credentials" {
+	switch {
+	case len(os.Args) > 1 && os.Args[1] == "credentials":
 		err = runCredentials(context.Background(), os.Args[2:], os.Getenv, os.Stdin, os.Stdout)
-	} else {
+	case len(os.Args) > 1 && os.Args[1] == "mcp":
+		err = runMCP(context.Background(), os.Args[2:], os.Getenv, os.Stdout)
+	default:
 		err = run()
 	}
 	if err != nil {

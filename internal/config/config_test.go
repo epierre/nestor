@@ -357,3 +357,30 @@ func TestCredentialsKey(t *testing.T) {
 		}
 	})
 }
+
+func TestAdminUserID(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    int64
+		wantErr bool
+	}{
+		{"unset", "", 0, false},
+		{"set", "1", 1, false},
+		{"not a number", "owner", 0, true},
+		{"zero", "0", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			env["ADMIN_USER_ID"] = tt.value
+			cfg, err := load(env)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Load error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && int64(cfg.AdminUserID) != tt.want {
+				t.Errorf("AdminUserID = %d, want %d", cfg.AdminUserID, tt.want)
+			}
+		})
+	}
+}

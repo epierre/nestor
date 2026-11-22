@@ -139,6 +139,27 @@ func (s *Store) ResolveIdentity(ctx context.Context, platform, externalID string
 	return user, nil
 }
 
+// ExternalIdentity implements store.Store.
+func (s *Store) ExternalIdentity(ctx context.Context, user identity.UserID, platform string) (string, error) {
+	if err := store.RequireUser(ctx, user); err != nil {
+		return "", err
+	}
+	var external string
+	err := s.pool.QueryRow(ctx, `
+		SELECT i.external_id FROM user_identities i JOIN users u ON u.id = i.user_id
+		WHERE i.user_id = $1 AND i.platform = $2
+			AND i.disabled_at IS NULL AND u.disabled_at IS NULL
+		ORDER BY i.external_id LIMIT 1`,
+		user, platform).Scan(&external)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", store.ErrIdentityNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("external identity: %w", err)
+	}
+	return external, nil
+}
+
 // ListActiveUsers implements store.Store. Like ResolveIdentity, it reads only the identity
 // directory so background loops can visit active allowlisted users one by one.
 func (s *Store) ListActiveUsers(ctx context.Context) ([]identity.UserID, error) {

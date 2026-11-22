@@ -56,6 +56,7 @@ var _ channel.Channel = (*Channel)(nil)
 // store.ErrIdentityNotFound for one that is unknown or disabled.
 type Identities interface {
 	ResolveIdentity(ctx context.Context, platform, externalID string) (identity.UserID, error)
+	ExternalIdentity(ctx context.Context, user identity.UserID, platform string) (string, error)
 }
 
 // Decider carries out the user's decision on a pending action. approval.Gate implements it.
@@ -314,6 +315,20 @@ func (c *Channel) Notify(ctx context.Context, chatID int64, text string) error {
 		return fmt.Errorf("send notice: %w", err)
 	}
 	return nil
+}
+
+// NotifyUser sends text to user's private chat in one attempt, like Notify. A private chat's ID is
+// the user's Telegram ID, so that ID is looked up here and never leaves the channel.
+func (c *Channel) NotifyUser(ctx context.Context, user identity.UserID, text string) error {
+	external, err := c.identities.ExternalIdentity(identity.WithUser(ctx, user), user, platform)
+	if err != nil {
+		return fmt.Errorf("notify user %d: %w", user, err)
+	}
+	chatID, err := strconv.ParseInt(external, 10, 64)
+	if err != nil {
+		return fmt.Errorf("notify user %d: telegram identity is not numeric", user)
+	}
+	return c.Notify(ctx, chatID, text)
 }
 
 // answer dismisses the button's loading state with text. A failure is logged, since the press

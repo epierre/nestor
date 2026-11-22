@@ -20,7 +20,7 @@
 ## 4. Pinning and health
 
 - [x] 4.1 Migration `mcp_tool_pins`; pin on first approval; compare on connect; model gets pinned description. Test: `pins_test.go` "first connect pins", "changed description disables tool", "model sees pinned not live text".
-- [ ] 4.2 Tools wait for admin approval: connect records the seen version (first sight included), `nestor mcp approve <server> <tool>` approves it, the admin is alerted once per new or changed version, `ADMIN_USER_ID` names the admin. Rewrites migration 0010 (not yet merged). Test: `pins_test.go` "new tool waits for approval", "approve enables tool", "re-approve re-enables tool", "admin alert shows old and new", "alert sent once per version"; `telegram_test.go` "notify user reaches their chat"; `config_test.go` ADMIN_USER_ID; `cmd/nestor` "mcp approve".
+- [x] 4.2 Tools wait for admin approval: connect records the seen version (first sight included), `nestor mcp approve <server> <tool>` approves it, the admin is alerted once per new or changed version, `ADMIN_USER_ID` names the admin. Rewrites migration 0010 (not yet merged). Test: `pins_test.go` "new tool waits for approval", "approve enables tool", "re-approve re-enables tool", "admin alert shows old and new", "alert sent once per version"; `telegram_test.go` "notify user reaches their chat"; `config_test.go` ADMIN_USER_ID; `cmd/nestor` "mcp approve".
 - [ ] 4.3 Health checks with backoff; unavailable server removes only its tools. Test: `health_test.go` "down server tools absent", "recovery re-adds after pin check".
 
 ## 5. Deployment and evals
