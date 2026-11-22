@@ -19,19 +19,33 @@ servers:
 
   - name: todoist
     transport: http
-    url: http://mcp-todoist-{user}:8080/mcp   # per-user instance
+    url: http://mcp-todoist:8080/mcp        # one shared instance
     image: ghcr.io/example/todoist-mcp:1.4.2
     credentials: per_user
     credential_key: todoist_token
+    credential_delivery: header             # token sent per call, see Credentials
     users: [1]
     tools:
       get_tasks:   { risk: read }
       add_task:    { risk: reversible }
       delete_task: { risk: critical }
+
+  - name: notes                             # third-party server that only reads an env var
+    transport: http
+    url: http://mcp-notes-{user}:8080/mcp   # one instance per user
+    image: ghcr.io/example/notes-mcp:0.9.0
+    credentials: per_user
+    credential_key: notes_token
+    credential_delivery: container
+    users: [1, 2]
+    tools:
+      list_notes: { risk: read }
 ```
 
 Validation at startup (process refuses to start on failure): every listed tool has a risk;
-`per_user` servers name a `credential_key`; `users` refers to existing users; names are unique.
+`per_user` servers name a `credential_key` and a `credential_delivery`; `users` refers to existing
+users; names are unique; `header` delivery requires `remote: false` and a URL without `{user}`;
+`container` delivery requires `{user}` in the URL.
 
 ## Tool naming
 
@@ -60,19 +74,28 @@ list, since a generic server cannot provide a trustworthy preview itself.
 
 ## Credentials
 
-Two options were considered for per-user servers:
+A server with `credentials: per_user` gets a user's token one of two ways, chosen per server by
+`credential_delivery` in `mcp.yaml`.
 
-1. One server instance per user, credential injected as an environment variable at container start.
-2. Shared instance, credential sent per request (HTTP header).
+- **`header`** (servers we run): one shared container. On each call Nestor sends the calling
+  user's token in an `Authorization` header, so the container only ever sees the token of the
+  user making the call. Only allowed when `remote: false`, so a token never leaves the host.
+- **`container`** (third-party servers that only accept an environment variable): one container
+  per (server, user), started with that user's token. Used only where a server cannot take a
+  header. Its token source is an open question (see below).
 
-Option 1 is the default: it is the only one that guarantees a server never holds two users'
-tokens, and most community servers only support env-var configuration. Option 2 is allowed only
-for servers we control. Credentials live in `user_credentials(user_id, key, ciphertext, nonce,
-updated_at)`, encrypted with AES-GCM under `CREDENTIALS_KEY` from the environment.
+In both cases the session used for a call is chosen from the user in the context, never from
+tool arguments. `ForUser(ctx, user)` returns the connection for that user, and a user with no
+stored credential for a server is not offered that server's tools (the missing credential is
+logged without its value).
 
-For option 1, the Compose file contains one service per (server, user). A small generator
-(`cmd/mcpgen`) renders those services from `mcp.yaml`, reading secrets at deploy time from
-Docker secrets rather than writing them into the Compose file.
+Credentials live in `user_credentials(user_id, key, ciphertext, nonce, updated_at)`, encrypted
+with AES-GCM under `CREDENTIALS_KEY` from the environment and bound to the user ID and key. They
+are entered with `nestor credentials set`.
+
+Open question for `container` servers: the container needs the token when it starts. Docker
+secrets (an earlier idea here) would keep a second copy outside the encrypted store. Settle the
+token source before task 3.4 is implemented.
 
 ## Description pinning
 
