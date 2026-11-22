@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -44,4 +45,13 @@ func (s *Session) ListTools(ctx context.Context) ([]*sdk.Tool, error) {
 // Close ends the session and, for stdio, the server process.
 func (s *Session) Close() error {
 	return s.cs.Close()
+}
+
+// CallTool invokes a tool on the server with args as its JSON arguments.
+func (s *Session) CallTool(ctx context.Context, name string, args json.RawMessage) (*sdk.CallToolResult, error) {
+	res, err := s.cs.CallTool(ctx, &sdk.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		return nil, fmt.Errorf("call mcp tool %q: %w", name, err)
+	}
+	return res, nil
 }
