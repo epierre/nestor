@@ -20,6 +20,7 @@ import (
 	"github.com/epierre/nestor/internal/channel/telegram"
 	"github.com/epierre/nestor/internal/config"
 	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/mcp"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/reminders"
@@ -79,6 +80,24 @@ func run() error {
 		return fmt.Errorf("load timezone: %w", err)
 	}
 	registry := toolRegistry(cfg.EnableDemoTools, bot, st, loc)
+	active, err := st.ListActiveUsers(ctx)
+	if err != nil {
+		return fmt.Errorf("list users: %w", err)
+	}
+	// MCP supervisors get their own context, so that whatever ends run, they are stopped before
+	// it returns rather than waited on while still running.
+	mcpCtx, stopMCP := context.WithCancel(ctx)
+	waitMCP, err := startMCP(mcpCtx, mcpDeps{
+		Config: cfg, Registry: registry, Pins: st, Credentials: st, Notifier: bot, Users: active, Dial: mcp.DialHTTP,
+	})
+	if err != nil {
+		stopMCP()
+		return fmt.Errorf("start mcp servers: %w", err)
+	}
+	defer func() {
+		stopMCP()
+		waitMCP()
+	}()
 	gate := approval.New(st, registry, cfg.ApprovalTTL)
 	bot.SetDecider(gate)
 	go reminders.Run(ctx, st, bot, reminderTick)

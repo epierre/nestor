@@ -158,3 +158,23 @@ func TestRecoveryReAddsAfterPinCheck(t *testing.T) {
 	srv.set(true, v1)
 	waitFor(t, "approved tool re-added", func() bool { return registered(reg, "weather__get_forecast") })
 }
+
+func TestApprovalTakesEffectWithoutReconnect(t *testing.T) {
+	pins := newPins()
+	reg := tools.NewRegistry()
+	srv := &switchableServer{up: true, description: v1}
+	supervise(t, reg, pins, srv)
+	waitFor(t, "first connect recorded", func() bool { _, ok := pins.seen("weather", "get_forecast"); return ok })
+	if registered(reg, "weather__get_forecast") {
+		t.Fatal("tool registered before approval")
+	}
+
+	pins.approve(t, "weather", "get_forecast")
+	waitFor(t, "approved tool registered", func() bool { return registered(reg, "weather__get_forecast") })
+	if n := srv.dialCount(); n != 1 {
+		t.Errorf("server dialled %d times, want 1: approval must not need a reconnect", n)
+	}
+	if registered(reg, "weather__get_tasks") {
+		t.Error("unapproved tool registered")
+	}
+}

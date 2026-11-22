@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/epierre/nestor/internal/mcp/config"
@@ -67,8 +68,9 @@ func (s *Supervisor) serve(ctx context.Context) bool {
 	if s.Users != nil {
 		conn = s.Users
 	}
-	names, err := s.Registrar.register(ctx, s.Server, session, conn)
-	defer s.remove(names)
+	names, err := s.Registrar.register(ctx, s.Server, session, conn, nil)
+	// A closure, so that the tools registered by later refreshes are removed too.
+	defer func() { s.remove(names) }()
 	if err != nil {
 		log.ErrorContext(ctx, "mcp server tools not registered", "error", err)
 		return false
@@ -92,8 +94,31 @@ func (s *Supervisor) serve(ctx context.Context) bool {
 				}
 				return true
 			}
+			// Re-check the pins, so an approval takes effect and a changed tool is disabled
+			// without waiting for a reconnect.
+			current := names
+			names, err = s.Registrar.register(ctx, s.Server, session, conn, current)
+			s.remove(without(current, names))
+			if added := without(names, current); len(added) > 0 {
+				log.InfoContext(ctx, "mcp tools enabled", "tools", added)
+			}
+			if err != nil {
+				log.ErrorContext(ctx, "mcp server tools not refreshed", "error", err)
+				return true
+			}
 		}
 	}
+}
+
+// without returns the names in all that are not in keep.
+func without(all, keep []string) []string {
+	var out []string
+	for _, name := range all {
+		if !slices.Contains(keep, name) {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func (s *Supervisor) remove(names []string) {

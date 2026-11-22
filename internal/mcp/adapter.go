@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -87,7 +87,7 @@ type Registrar struct {
 // Register adds server's approved tools, with every call running on s. A tool that the server
 // does not offer, or whose name is already registered, is an error.
 func (r *Registrar) Register(ctx context.Context, server config.Server, s *Session) error {
-	_, err := r.register(ctx, server, s, fixedSession{s})
+	_, err := r.register(ctx, server, s, fixedSession{s}, nil)
 	return err
 }
 
@@ -99,13 +99,14 @@ func (r *Registrar) RegisterUser(ctx context.Context, server config.Server, user
 	if err != nil {
 		return fmt.Errorf("server %q: %w", server.Name, err)
 	}
-	_, err = r.register(ctx, server, listing, users)
+	_, err = r.register(ctx, server, listing, users, nil)
 	return err
 }
 
-// register adds server's approved tools and returns the names it registered, also on error, so
-// a caller can remove them again.
-func (r *Registrar) register(ctx context.Context, server config.Server, listing *Session, conn connector) (names []string, err error) {
+// register adds server's approved tools and returns the names of all its tools now registered,
+// also on error, so a caller can remove them again. Tools named in current were registered by an
+// earlier call: those still approved are kept as they are rather than registered again.
+func (r *Registrar) register(ctx context.Context, server config.Server, listing *Session, conn connector, current []string) (names []string, err error) {
 	offered, err := listing.ListTools(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("server %q: %w", server.Name, err)
@@ -149,6 +150,10 @@ func (r *Registrar) register(ctx context.Context, server config.Server, listing 
 			if state.NewlySeen {
 				r.alert(ctx, changedToolText(*pin, live))
 			}
+			continue
+		}
+		if fullName := server.Name + namespaceSep + name; slices.Contains(current, fullName) {
+			names = append(names, fullName)
 			continue
 		}
 		adapted := &adapterTool{
@@ -199,15 +204,7 @@ func (t *adapterTool) EnabledFor(ctx context.Context, user identity.UserID) bool
 }
 
 func (t *adapterTool) listed(user identity.UserID) bool {
-	for _, u := range t.users {
-		if u == "*" {
-			return true
-		}
-		if id, err := strconv.ParseInt(u, 10, 64); err == nil && identity.UserID(id) == user {
-			return true
-		}
-	}
-	return false
+	return config.UsersInclude(t.users, user)
 }
 
 func (t *adapterTool) Name() string            { return t.name }

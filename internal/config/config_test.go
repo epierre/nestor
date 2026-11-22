@@ -384,3 +384,15 @@ func TestAdminUserID(t *testing.T) {
 		})
 	}
 }
+
+func TestMCPConfigPath(t *testing.T) {
+	env := validEnv()
+	env["MCP_CONFIG"] = "/etc/nestor/mcp.yaml"
+	cfg, err := load(env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MCPConfigPath != "/etc/nestor/mcp.yaml" {
+		t.Errorf("MCPConfigPath = %q", cfg.MCPConfigPath)
+	}
+}

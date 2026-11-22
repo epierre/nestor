@@ -1,0 +1,17 @@
+# MCP servers Nestor may use. Reviewed in git; Nestor reads it from MCP_CONFIG at startup, and an
+# invalid file stops it. Every tool stays disabled until approved after review with
+#   nestor mcp approve <server> <tool>
+# and a changed description or schema disables it again. Risk levels come from here only.
+servers:
+  - name: timezone
+    transport: http
+    url: http://mcp-timezone:8080/mcp
+    image: nestor-mcp-timezone   # built from deploy/mcp-timezone.Dockerfile
+    remote: false
+    credentials: none
+    users: ["*"]
+    timeout: 5s
+    max_result_bytes: 4096
+    tools:
+      get_time:     { risk: read }
+      convert_time: { risk: read }

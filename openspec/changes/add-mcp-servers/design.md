@@ -119,8 +119,9 @@ the latest one **seen** on connect. At every connect the adapter records what it
   gets a message with the old and new description.
 
 The admin is messaged once per newly seen version, not on every connect.
-`nestor mcp approve <server> <tool>` approves the version last seen; the tool is offered from the
-next connect on (startup, or reconnect after a health check).
+`nestor mcp approve <server> <tool>` approves the version last seen. Each health check (every 30s
+by default) re-checks the pins, so an approval takes effect, and a tool that changes while
+connected is disabled, without a reconnect.
 
 The model always receives the approved description and schema, never live ones.
 

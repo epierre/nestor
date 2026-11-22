@@ -152,6 +152,20 @@ func validateDelivery(s Server) []error {
 	return errs
 }
 
+// UsersInclude reports whether a server's users list from mcp.yaml includes user: "*" includes
+// everyone.
+func UsersInclude(users []string, user identity.UserID) bool {
+	for _, u := range users {
+		if u == "*" {
+			return true
+		}
+		if id, err := strconv.ParseInt(u, 10, 64); err == nil && identity.UserID(id) == user {
+			return true
+		}
+	}
+	return false
+}
+
 func isKnownUser(raw string, knownUsers []identity.UserID) bool {
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {

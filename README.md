@@ -95,6 +95,7 @@ Changes 9 and 10 depend only on change 2 and can be pulled earlier.
 ```
 cmd/nestor/          Entrypoint
 cmd/mcp-timezone/    Reference MCP server: read-only time zone tools
+config/mcp.yaml      MCP servers Nestor may use, with the risk of each allowlisted tool
 internal/            Application packages
 evals/               On-demand real-model evaluation suites (-tags eval)
 deploy/              Docker Compose stack and LiteLLM configuration
@@ -137,6 +138,7 @@ Set these in `deploy/.env`, which git ignores (validated by [`internal/config/co
 | `APPROVAL_STALE_AFTER` | No | How long an approved action may run before a sweep marks its outcome unknown and notifies the owner. Default `5m` |
 | `TIMEZONE` | No | IANA timezone for local clock context, tasks and reminders. Default `Europe/Zurich` |
 | `CREDENTIALS_KEY` | No | Base64 of 32 random bytes (`openssl rand -base64 32`) that encrypts per-user MCP credentials. Needed to store one with `nestor credentials set` |
+| `MCP_CONFIG` | No | Path of the reviewed `mcp.yaml`. Set by `docker-compose.yml`, which mounts [`config/mcp.yaml`](config/mcp.yaml). Unset: no MCP servers |
 | `ADMIN_USER_ID` | No | Internal user ID (not a Telegram ID) who receives operational alerts, such as an MCP tool waiting for `nestor mcp approve`. Unset: alerts are only logged |
 
 ### Using the bot
@@ -208,6 +210,35 @@ docker compose -f deploy/docker-compose.yml logs nestor | grep '"request_id":"TH
 8. Send a voice message. You get the text-only notice and no new `model_calls` row.
 9. From an account not on the allowlist, message the bot. Nothing comes back, and the logs show
    `ignored message from unknown sender`.
+10. The logs show `mcp tool waiting for approval` for `get_time` and `convert_time`, and with
+    `ADMIN_USER_ID` set you get a Telegram message for each. Ask "what time is it in Tokyo?": the
+    reply does not use the time-zone tools.
+11. Approve both tools (see [MCP servers](#mcp-servers)). Within a minute the logs show
+    `mcp tools enabled` with both names. Ask again. The reply gives the Tokyo time,
+    and `tool_calls` has a row with `tool_name` `timezone__get_time` and status `executed`.
+12. `docker compose -f deploy/docker-compose.yml stop mcp-timezone`, then ask "what time is it?".
+    Nestor still answers (from the clock in its prompt), and the logs show
+    `mcp server stopped answering`. Start it again and the tools come back without a restart.
+
+### MCP servers
+
+[`config/mcp.yaml`](config/mcp.yaml) lists the MCP servers Nestor connects to and the risk of each
+tool it may use. Every tool stays disabled until you approve it, and is disabled again if its
+description or input schema changes. Set `ADMIN_USER_ID` to your internal user ID
+(`SELECT id, display_name FROM users;`) to get a Telegram message when a tool waits for approval.
+
+```sh
+docker compose -f deploy/docker-compose.yml exec nestor /nestor mcp approve timezone get_time
+docker compose -f deploy/docker-compose.yml exec nestor /nestor mcp approve timezone convert_time
+```
+
+An approved tool is offered within one health check (about 30 seconds). For a server with
+per-user credentials, store each user's token from stdin (it never appears in the shell history
+or the logs):
+
+```sh
+docker compose -f deploy/docker-compose.yml exec -T nestor /nestor credentials set 1 todoist_token < token.txt
+```
 
 ### MCP server isolation check
 

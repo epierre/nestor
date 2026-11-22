@@ -28,6 +28,9 @@ services:
       TIMEZONE: ${TIMEZONE:-}
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:-}
       ADMIN_USER_ID: ${ADMIN_USER_ID:-}
+      MCP_CONFIG: /etc/nestor/mcp.yaml
+    volumes:
+      - ../config/mcp.yaml:/etc/nestor/mcp.yaml:ro
     networks:
       - default
       - database

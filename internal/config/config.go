@@ -44,6 +44,8 @@ type Config struct {
 	Timezone string
 	// ApprovalTTL is how long a proposed action waits for its user's decision.
 	ApprovalTTL time.Duration
+	// MCPConfigPath is the reviewed mcp.yaml listing MCP servers. Empty: no MCP servers.
+	MCPConfigPath string
 	// AdminUserID is the internal user who receives operational alerts, such as an MCP tool
 	// waiting for approval. Zero when unset; alerts are then only logged.
 	AdminUserID identity.UserID
@@ -136,6 +138,8 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.AllowedTelegramUsers = users
 	}
+
+	cfg.MCPConfigPath = get("MCP_CONFIG")
 
 	if raw := get("ADMIN_USER_ID"); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)

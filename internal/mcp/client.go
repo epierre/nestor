@@ -29,6 +29,11 @@ func Connect(ctx context.Context, t sdk.Transport) (*Session, error) {
 	return &Session{cs: cs}, nil
 }
 
+// DialHTTP connects to a server over streamable HTTP at url.
+func DialHTTP(ctx context.Context, url string) (*Session, error) {
+	return Connect(ctx, &sdk.StreamableClientTransport{Endpoint: url, DisableStandaloneSSE: true})
+}
+
 // ListTools returns every tool the server offers, following pagination. Nothing is filtered
 // here: the allowlist in mcp.yaml decides which tools are exposed.
 func (s *Session) ListTools(ctx context.Context) ([]*sdk.Tool, error) {

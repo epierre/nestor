@@ -34,7 +34,8 @@ func runMCP(ctx context.Context, args []string, getenv func(string) string, stdo
 }
 
 // mcpCommand runs one mcp subcommand. Only "approve" exists: it approves the description and
-// schema last seen for a tool, which is offered from the next connect on.
+// schema last seen for a tool, which the running server's supervisor picks up at its next health
+// check.
 func mcpCommand(ctx context.Context, approver toolApprover, args []string, w io.Writer) error {
 	if len(args) != 3 || args[0] != "approve" {
 		return errors.New(mcpUsage)
@@ -47,7 +48,7 @@ func mcpCommand(ctx context.Context, approver toolApprover, args []string, w io.
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "approved %s__%s with description:\n%s\n\nIt is offered from the next connect (restart or reconnect).\n",
+	_, err = fmt.Fprintf(w, "approved %s__%s with description:\n%s\n\nIt is offered from the next health check, within about 30 seconds.\n",
 		pin.Server, pin.Tool, pin.Description)
 	return err
 }
