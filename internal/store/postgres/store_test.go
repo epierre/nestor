@@ -1123,3 +1123,25 @@ func TestMigrate0007UpAndDown(t *testing.T) {
 		t.Errorf("after up: tables %v, want %v", got, appTables)
 	}
 }
+
+func TestTruncatedToolCallStatusAccepted(t *testing.T) {
+	st, pool, a, _, ctxA, _ := twoScoped(t)
+	conversation := active(t, st, ctxA, a)
+
+	_, err := st.RecordToolCall(ctxA, a, store.ToolCall{
+		ConversationID: conversation.ID,
+		ToolName:       "weather__get_forecast",
+		ArgsJSON:       json.RawMessage(`{}`),
+		Risk:           tools.RiskRead,
+		Status:         store.ToolCallStatusTruncated,
+		ResultJSON:     json.RawMessage(`"[truncated]"`),
+		StartedAt:      time.Now().UTC(),
+		Latency:        time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("RecordToolCall with truncated status: %v", err)
+	}
+	if got := count(t, pool, `SELECT count(*) FROM tool_calls WHERE status = 'truncated' AND user_id = $1`, a); got != 1 {
+		t.Errorf("truncated rows for user = %d, want 1", got)
+	}
+}

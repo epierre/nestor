@@ -1651,3 +1651,46 @@ func TestUnrecordedChatNoticeDeliveredOnNextMessage(t *testing.T) {
 		t.Errorf("notices = %+v, want sent only once", notices.sent)
 	}
 }
+
+// truncatingTool returns a result that the adapter cut to the server's size cap.
+type truncatingTool struct{}
+
+func (truncatingTool) Name() string                            { return "weather__get_forecast" }
+func (truncatingTool) Description() string                     { return "returns a long result" }
+func (truncatingTool) Schema() json.RawMessage                 { return json.RawMessage(`{"type":"object"}`) }
+func (truncatingTool) Risk() tools.Risk                        { return tools.RiskRead }
+func (truncatingTool) Preview(json.RawMessage) (string, error) { return "", nil }
+func (truncatingTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
+	return tools.Result{Content: "partial\n[truncated: 900 bytes omitted]", Truncated: true}, nil
+}
+
+func TestTruncatedMCPResultRecordedAsTruncated(t *testing.T) {
+	call := model.ToolCall{ID: "call_big", Name: "weather__get_forecast", Arguments: json.RawMessage(`{}`)}
+	turns := []model.CompletionResponse{
+		{ToolCalls: []model.ToolCall{call}},
+		{Content: "Here is the forecast."},
+	}
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		return turns[(len(req.Messages)-2)/2], nil
+	}}
+
+	reg := tools.NewRegistry()
+	if err := reg.Register(truncatingTool{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	opts := testOptions()
+	opts.Tools = reg
+	st := testutil.NewFakeStore()
+	a := New(client, st, opts)
+
+	if reply := send(t, a, 7, "forecast?"); reply != "Here is the forecast." {
+		t.Errorf("got reply %q", reply)
+	}
+	recorded := st.ToolCalls(7)
+	if len(recorded) != 1 {
+		t.Fatalf("recorded %d tool calls for user 7, want 1", len(recorded))
+	}
+	if recorded[0].Status != store.ToolCallStatusTruncated {
+		t.Errorf("recorded status %q, want %q", recorded[0].Status, store.ToolCallStatusTruncated)
+	}
+}

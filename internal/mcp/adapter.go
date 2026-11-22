@@ -102,20 +102,22 @@ func (t *adapterTool) Execute(ctx context.Context, args json.RawMessage) (tools.
 	if res.IsError {
 		return tools.Result{}, errors.New(text)
 	}
-	return tools.Result{Content: capResult(text, t.maxBytes)}, nil
+	content, truncated := capResult(text, t.maxBytes)
+	return tools.Result{Content: content, Truncated: truncated}, nil
 }
 
 // capResult returns text unchanged when it fits in max bytes. Otherwise it returns the longest
-// valid UTF-8 prefix that fits, followed by a marker giving the number of bytes left out.
-func capResult(text string, max int) string {
+// valid UTF-8 prefix that fits, followed by a marker giving the number of bytes left out, and
+// reports that the text was truncated.
+func capResult(text string, max int) (string, bool) {
 	if len(text) <= max {
-		return text
+		return text, false
 	}
 	cut := max
 	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
-	return fmt.Sprintf("%s\n[truncated: %d bytes omitted]", text[:cut], len(text)-cut)
+	return fmt.Sprintf("%s\n[truncated: %d bytes omitted]", text[:cut], len(text)-cut), true
 }
 
 func orDefault[T comparable](v, fallback T) T {

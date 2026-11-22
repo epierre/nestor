@@ -271,6 +271,9 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 					content = tools.MarkData(fmt.Sprintf("error: %v", execErr))
 				} else {
 					status = store.ToolCallStatusExecuted
+					if res.Truncated {
+						status = store.ToolCallStatusTruncated
+					}
 					resBytes, _ := json.Marshal(res.Content)
 					resultJSON = resBytes
 					content = tools.MarkData(res.Content)

@@ -72,10 +72,11 @@ type ModelCall struct {
 
 // Values of ToolCall.Status.
 const (
-	ToolCallStatusExecuted = "executed"
-	ToolCallStatusRejected = "rejected"
-	ToolCallStatusError    = "error"
-	ToolCallStatusProposed = "proposed"
+	ToolCallStatusExecuted  = "executed"
+	ToolCallStatusRejected  = "rejected"
+	ToolCallStatusError     = "error"
+	ToolCallStatusProposed  = "proposed"
+	ToolCallStatusTruncated = "truncated"
 )
 
 // ToolCall is one row of the tool call log.

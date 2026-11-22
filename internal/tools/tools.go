@@ -14,9 +14,11 @@ const (
 	RiskCritical   Risk = "critical"   // external or irreversible (send email, delete, accept invite)
 )
 
-// Result is the output of executing a tool.
+// Result is the output of executing a tool. Truncated is set when Content is a cut-down form of
+// the full output, so the tool call log can say so.
 type Result struct {
-	Content string
+	Content   string
+	Truncated bool
 }
 
 func (r Result) String() string {

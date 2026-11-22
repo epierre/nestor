@@ -216,6 +216,9 @@ func TestExecuteTruncatesOversizedResult(t *testing.T) {
 	if n := len(res.Content); n > 1024+100 {
 		t.Errorf("result is %d bytes, want close to the 1024 byte cap", n)
 	}
+	if !res.Truncated {
+		t.Error("Truncated = false, want true for an oversized result")
+	}
 	if !utf8.ValidString(res.Content) {
 		t.Error("truncation split a multi-byte character")
 	}
