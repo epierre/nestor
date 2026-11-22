@@ -26,10 +26,11 @@ servers:
 
   - name: todoist
     transport: http
-    url: http://mcp-todoist-{user}:8080/mcp
+    url: http://mcp-todoist:8080/mcp
     image: ghcr.io/example/todoist-mcp:1.4.2
     credentials: per_user
     credential_key: todoist_token
+    credential_delivery: header
     users: [1]
     tools:
       get_tasks:   { risk: read }
@@ -60,13 +61,14 @@ func TestLoad(t *testing.T) {
 					Tools:          map[string]Tool{"get_forecast": {Risk: tools.RiskRead}},
 				},
 				{
-					Name:          "todoist",
-					Transport:     "http",
-					URL:           "http://mcp-todoist-{user}:8080/mcp",
-					Image:         "ghcr.io/example/todoist-mcp:1.4.2",
-					Credentials:   "per_user",
-					CredentialKey: "todoist_token",
-					Users:         []string{"1"},
+					Name:               "todoist",
+					Transport:          "http",
+					URL:                "http://mcp-todoist:8080/mcp",
+					Image:              "ghcr.io/example/todoist-mcp:1.4.2",
+					Credentials:        "per_user",
+					CredentialKey:      "todoist_token",
+					CredentialDelivery: "header",
+					Users:              []string{"1"},
 					Tools: map[string]Tool{
 						"get_tasks":   {Risk: tools.RiskRead},
 						"add_task":    {Risk: tools.RiskReversible},

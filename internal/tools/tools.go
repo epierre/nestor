@@ -39,14 +39,16 @@ type Tool interface {
 
 // UserScoped is implemented by a tool that only some users may use, such as an MCP tool whose
 // server is enabled for a subset of users. Tools that do not implement it are available to all.
+// EnabledFor may read user data, such as whether the user has a stored credential, so ctx must
+// carry user.
 type UserScoped interface {
-	EnabledFor(user identity.UserID) bool
+	EnabledFor(ctx context.Context, user identity.UserID) bool
 }
 
 // Enabled reports whether t may be offered to or run for user.
-func Enabled(t Tool, user identity.UserID) bool {
+func Enabled(ctx context.Context, t Tool, user identity.UserID) bool {
 	scoped, ok := t.(UserScoped)
-	return !ok || scoped.EnabledFor(user)
+	return !ok || scoped.EnabledFor(ctx, user)
 }
 
 // ContextPreviewer is implemented by a tool whose approval preview needs the stored data that its

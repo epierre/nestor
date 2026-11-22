@@ -26,11 +26,41 @@ const (
 	defaultMaxResultBytes = 64 << 10
 )
 
-// RegisterTools adds every tool allowlisted for server to reg, named <server>__<tool>. Risk comes
-// from the configuration; annotations the server sends are ignored. A tool that the server does
-// not offer, or whose name is already registered, is an error.
+// connector gives the session a call runs on.
+type connector interface {
+	sessionFor(ctx context.Context) (*Session, error)
+}
+
+// credentialChecker is implemented by a connector whose server needs a per-user credential.
+type credentialChecker interface {
+	HasCredential(ctx context.Context, user identity.UserID) bool
+}
+
+// fixedSession serves every call on one session: a server without per-user credentials.
+type fixedSession struct{ s *Session }
+
+func (f fixedSession) sessionFor(context.Context) (*Session, error) { return f.s, nil }
+
+// RegisterTools adds every tool allowlisted for server to reg, named <server>__<tool>, with every
+// call running on s. Risk comes from the configuration; annotations the server sends are ignored.
+// A tool that the server does not offer, or whose name is already registered, is an error.
 func RegisterTools(ctx context.Context, reg *tools.Registry, server config.Server, s *Session) error {
-	offered, err := s.ListTools(ctx)
+	return registerTools(ctx, reg, server, s, fixedSession{s})
+}
+
+// RegisterUserTools is RegisterTools for a per_user server with header delivery: each call runs on
+// the session of the user in its context. The tool list is read as the user in ctx, who must have
+// a stored credential.
+func RegisterUserTools(ctx context.Context, reg *tools.Registry, server config.Server, users *UserConnector) error {
+	listing, err := users.sessionFor(ctx)
+	if err != nil {
+		return fmt.Errorf("server %q: %w", server.Name, err)
+	}
+	return registerTools(ctx, reg, server, listing, users)
+}
+
+func registerTools(ctx context.Context, reg *tools.Registry, server config.Server, listing *Session, conn connector) error {
+	offered, err := listing.ListTools(ctx)
 	if err != nil {
 		return fmt.Errorf("server %q: %w", server.Name, err)
 	}
@@ -54,7 +84,7 @@ func RegisterTools(ctx context.Context, reg *tools.Registry, server config.Serve
 			name:     server.Name + namespaceSep + name,
 			risk:     cfg.Risk,
 			schema:   schema,
-			session:  s,
+			conn:     conn,
 			timeout:  orDefault(server.Timeout, defaultTimeout),
 			maxBytes: orDefault(server.MaxResultBytes, defaultMaxResultBytes),
 			users:    server.Users,
@@ -73,14 +103,25 @@ type adapterTool struct {
 	name     string // the registered name, <server>__<remote>
 	risk     tools.Risk
 	schema   json.RawMessage
-	session  *Session
+	conn     connector
 	timeout  time.Duration
 	maxBytes int
 	users    []string // the server's users list from mcp.yaml: user IDs, or "*"
 }
 
-// EnabledFor reports whether the server is enabled for user, by the users list in mcp.yaml.
-func (t *adapterTool) EnabledFor(user identity.UserID) bool {
+// EnabledFor reports whether the server is enabled for user by the users list in mcp.yaml and, for
+// a per_user server, whether user has a stored credential for it.
+func (t *adapterTool) EnabledFor(ctx context.Context, user identity.UserID) bool {
+	if !t.listed(user) {
+		return false
+	}
+	if checker, ok := t.conn.(credentialChecker); ok {
+		return checker.HasCredential(ctx, user)
+	}
+	return true
+}
+
+func (t *adapterTool) listed(user identity.UserID) bool {
 	for _, u := range t.users {
 		if u == "*" {
 			return true
@@ -108,7 +149,11 @@ func (t *adapterTool) Execute(ctx context.Context, args json.RawMessage) (tools.
 	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
-	res, err := t.session.CallTool(callCtx, t.remote, args)
+	session, err := t.conn.sessionFor(callCtx)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("mcp tool %s: %w", t.name, err)
+	}
+	res, err := session.CallTool(callCtx, t.remote, args)
 	if err != nil {
 		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
 			return tools.Result{}, fmt.Errorf("mcp tool %s timed out after %s", t.name, t.timeout)

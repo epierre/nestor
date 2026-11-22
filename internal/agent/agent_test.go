@@ -1706,7 +1706,9 @@ func (scopedTool) Description() string                     { return "forecast fo
 func (scopedTool) Schema() json.RawMessage                 { return json.RawMessage(`{"type":"object"}`) }
 func (scopedTool) Risk() tools.Risk                        { return tools.RiskRead }
 func (scopedTool) Preview(json.RawMessage) (string, error) { return "", nil }
-func (s scopedTool) EnabledFor(user identity.UserID) bool  { return user == s.enabledFor }
+func (s scopedTool) EnabledFor(_ context.Context, user identity.UserID) bool {
+	return user == s.enabledFor
+}
 func (s scopedTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
 	*s.executed++
 	return tools.Result{Content: "sunny"}, nil

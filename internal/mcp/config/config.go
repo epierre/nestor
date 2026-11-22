@@ -23,17 +23,20 @@ type File struct {
 
 // Server is one MCP server the assistant may connect to.
 type Server struct {
-	Name           string          `yaml:"name"`
-	Transport      string          `yaml:"transport"` // "http" or "stdio"
-	URL            string          `yaml:"url"`
-	Image          string          `yaml:"image"`
-	Remote         bool            `yaml:"remote"` // true = hosted by a third party, so data leaves the host
-	Credentials    string          `yaml:"credentials"`
-	CredentialKey  string          `yaml:"credential_key"`
-	Users          []string        `yaml:"users"` // internal user IDs, or "*" for every user
-	Timeout        time.Duration   `yaml:"timeout"`
-	MaxResultBytes int             `yaml:"max_result_bytes"`
-	Tools          map[string]Tool `yaml:"tools"` // the allowlist: only these tools are exposed
+	Name          string `yaml:"name"`
+	Transport     string `yaml:"transport"` // "http" or "stdio"
+	URL           string `yaml:"url"`
+	Image         string `yaml:"image"`
+	Remote        bool   `yaml:"remote"` // true = hosted by a third party, so data leaves the host
+	Credentials   string `yaml:"credentials"`
+	CredentialKey string `yaml:"credential_key"`
+	// CredentialDelivery says how a per_user token reaches the server: "header" (one shared
+	// instance, token sent on each call) or "container" (one instance per user).
+	CredentialDelivery string          `yaml:"credential_delivery"`
+	Users              []string        `yaml:"users"` // internal user IDs, or "*" for every user
+	Timeout            time.Duration   `yaml:"timeout"`
+	MaxResultBytes     int             `yaml:"max_result_bytes"`
+	Tools              map[string]Tool `yaml:"tools"` // the allowlist: only these tools are exposed
 }
 
 // Tool is one allowlisted tool. Its risk comes from here, never from the server.
@@ -77,10 +80,14 @@ func validateServer(s Server, knownUsers []identity.UserID) []error {
 
 	switch s.Credentials {
 	case "none", "shared":
+		if s.CredentialDelivery != "" {
+			fail("sets credential_delivery but does not use per_user credentials")
+		}
 	case "per_user":
 		if s.CredentialKey == "" {
 			fail("uses per_user credentials but names no credential_key")
 		}
+		errs = append(errs, validateDelivery(s)...)
 	default:
 		fail("has unknown credentials %q", s.Credentials)
 	}
@@ -110,6 +117,38 @@ func validateServer(s Server, knownUsers []identity.UserID) []error {
 		}
 	}
 
+	return errs
+}
+
+// validateDelivery checks how a per_user server receives its token. A header carries the token
+// to a shared instance, so it must stay on the host; a container is started per user.
+func validateDelivery(s Server) []error {
+	var errs []error
+	fail := func(format string, args ...any) {
+		errs = append(errs, fmt.Errorf("server %q "+format, append([]any{s.Name}, args...)...))
+	}
+	perUserURL := strings.Contains(s.URL, userPlaceholder)
+
+	switch s.CredentialDelivery {
+	case "":
+		fail("uses per_user credentials but sets no credential_delivery")
+	case "header":
+		if s.Remote {
+			fail("sends tokens in a header, which needs remote: false")
+		}
+		if s.Transport != "http" {
+			fail("uses header delivery, which needs transport http")
+		}
+		if perUserURL {
+			fail("uses header delivery, so its URL must not contain %s", userPlaceholder)
+		}
+	case "container":
+		if !perUserURL {
+			fail("uses container delivery, so its URL must contain %s", userPlaceholder)
+		}
+	default:
+		fail("has unknown credential_delivery %q", s.CredentialDelivery)
+	}
 	return errs
 }
 

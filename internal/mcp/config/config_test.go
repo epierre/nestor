@@ -68,7 +68,79 @@ func TestValidate(t *testing.T) {
 			mutate: func(s *Server) {
 				s.Credentials = "per_user"
 				s.CredentialKey = "todoist_token"
+				s.CredentialDelivery = "header"
 			},
+		},
+		{
+			name: "per_user without credential delivery",
+			mutate: func(s *Server) {
+				s.Credentials = "per_user"
+				s.CredentialKey = "todoist_token"
+			},
+			wantErr: `server "weather" uses per_user credentials but sets no credential_delivery`,
+		},
+		{
+			name: "unknown credential delivery",
+			mutate: func(s *Server) {
+				s.Credentials = "per_user"
+				s.CredentialKey = "todoist_token"
+				s.CredentialDelivery = "query"
+			},
+			wantErr: `server "weather" has unknown credential_delivery "query"`,
+		},
+		{
+			name: "header delivery refused for remote servers",
+			mutate: func(s *Server) {
+				s.URL = "https://mcp.example.com/mcp"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "todoist_token"
+				s.CredentialDelivery = "header"
+			},
+			wantErr: `server "weather" sends tokens in a header, which needs remote: false`,
+		},
+		{
+			name: "header delivery with per-user URL",
+			mutate: func(s *Server) {
+				s.URL = "http://mcp-todoist-{user}:8080/mcp"
+				s.Credentials = "per_user"
+				s.CredentialKey = "todoist_token"
+				s.CredentialDelivery = "header"
+			},
+			wantErr: `server "weather" uses header delivery, so its URL must not contain {user}`,
+		},
+		{
+			name: "header delivery over stdio",
+			mutate: func(s *Server) {
+				s.Transport = "stdio"
+				s.Credentials = "per_user"
+				s.CredentialKey = "todoist_token"
+				s.CredentialDelivery = "header"
+			},
+			wantErr: `server "weather" uses header delivery, which needs transport http`,
+		},
+		{
+			name: "container delivery with per-user URL",
+			mutate: func(s *Server) {
+				s.URL = "http://mcp-notes-{user}:8080/mcp"
+				s.Credentials = "per_user"
+				s.CredentialKey = "notes_token"
+				s.CredentialDelivery = "container"
+			},
+		},
+		{
+			name: "container delivery without per-user URL",
+			mutate: func(s *Server) {
+				s.Credentials = "per_user"
+				s.CredentialKey = "notes_token"
+				s.CredentialDelivery = "container"
+			},
+			wantErr: `server "weather" uses container delivery, so its URL must contain {user}`,
+		},
+		{
+			name:    "credential delivery without per_user credentials",
+			mutate:  func(s *Server) { s.CredentialDelivery = "header" },
+			wantErr: `server "weather" sets credential_delivery but does not use per_user credentials`,
 		},
 		{
 			name:    "user refers to unknown user",

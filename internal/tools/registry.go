@@ -94,14 +94,14 @@ func (r *Registry) Lookup(name string) (Tool, error) {
 // Tools returns the list of registered tools formatted for language model requests,
 // in registration order.
 // ToolsFor lists the tools that user may use, in registration order.
-func (r *Registry) ToolsFor(user identity.UserID) []model.Tool {
+func (r *Registry) ToolsFor(ctx context.Context, user identity.UserID) []model.Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	out := make([]model.Tool, 0, len(r.order))
 	for _, name := range r.order {
 		t := r.tools[name]
-		if !Enabled(t, user) {
+		if !Enabled(ctx, t, user) {
 			continue
 		}
 		out = append(out, model.Tool{
@@ -166,8 +166,8 @@ func (r *Registry) AgentView() *AgentView {
 }
 
 // ToolsFor lists the tools offered to user in a model request.
-func (v *AgentView) ToolsFor(user identity.UserID) []model.Tool {
-	return v.reg.ToolsFor(user)
+func (v *AgentView) ToolsFor(ctx context.Context, user identity.UserID) []model.Tool {
+	return v.reg.ToolsFor(ctx, user)
 }
 
 func (v *AgentView) Lookup(name string) (Tool, error) {
@@ -190,8 +190,8 @@ type refusingTool struct {
 }
 
 // EnabledFor keeps the wrapped tool's user scope. The embedded interface would otherwise hide it.
-func (r refusingTool) EnabledFor(user identity.UserID) bool {
-	return Enabled(r.Tool, user)
+func (r refusingTool) EnabledFor(ctx context.Context, user identity.UserID) bool {
+	return Enabled(ctx, r.Tool, user)
 }
 
 func (r *refusingTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {

@@ -1,15 +1,20 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/epierre/nestor/internal/approval"
+	"github.com/epierre/nestor/internal/credentials"
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/mcp/config"
 	"github.com/epierre/nestor/internal/store"
@@ -287,9 +292,157 @@ func TestEnabledForUsers(t *testing.T) {
 			if !ok {
 				t.Fatal("adapted tool does not implement tools.UserScoped")
 			}
-			if got := scoped.EnabledFor(tt.user); got != tt.want {
+			if got := scoped.EnabledFor(ctx, tt.user); got != tt.want {
 				t.Errorf("EnabledFor(%d) = %v, want %v", tt.user, got, tt.want)
 			}
 		})
+	}
+}
+
+// tokenServer serves a "whoami" tool over streamable HTTP. The tool returns the Authorization
+// header of the request that carried the call, so a test sees which token the server received.
+func tokenServer(t *testing.T) string {
+	t.Helper()
+	srv := sdk.NewServer(&sdk.Implementation{Name: "tokens", Version: "0.0.1"}, nil)
+	srv.AddTool(&sdk.Tool{Name: "whoami", InputSchema: map[string]any{"type": "object"}},
+		func(_ context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			got := ""
+			if req.Extra != nil {
+				got = req.Extra.Header.Get("Authorization")
+			}
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: got}}}, nil
+		})
+	ts := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil))
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
+func headerServerConfig(url string) config.Server {
+	return config.Server{
+		Name:               "todoist",
+		Transport:          "http",
+		URL:                url,
+		Credentials:        "per_user",
+		CredentialKey:      "todoist_token",
+		CredentialDelivery: "header",
+		Users:              []string{"1", "2"},
+		Tools:              map[string]config.Tool{"whoami": {Risk: tools.RiskRead}},
+	}
+}
+
+func testSealer(t *testing.T) *credentials.Sealer {
+	t.Helper()
+	s, err := credentials.NewSealer(bytes.Repeat([]byte{3}, credentials.KeySize))
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	return s
+}
+
+// storeToken encrypts token for user and stores it as the todoist credential.
+func storeToken(t *testing.T, st *testutil.FakeStore, sealer *credentials.Sealer, user identity.UserID, token string) {
+	t.Helper()
+	ct, nonce, err := sealer.Seal(user, "todoist_token", []byte(token))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := st.SetCredential(identity.WithUser(context.Background(), user), user, "todoist_token", ct, nonce); err != nil {
+		t.Fatalf("SetCredential: %v", err)
+	}
+}
+
+func whoami(t *testing.T, tool tools.Tool, user identity.UserID) string {
+	t.Helper()
+	res, err := tool.Execute(identity.WithUser(context.Background(), user), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute as user %d: %v", user, err)
+	}
+	return res.Content
+}
+
+func TestEachUserServedWithOwnToken(t *testing.T) {
+	st := testutil.NewFakeStore()
+	sealer := testSealer(t)
+	storeToken(t, st, sealer, 1, "test-token-1")
+	storeToken(t, st, sealer, 2, "test-token-2")
+
+	server := headerServerConfig(tokenServer(t))
+	conn := NewUserConnector(server, st, sealer)
+	t.Cleanup(conn.Close)
+	reg := tools.NewRegistry()
+	if err := RegisterUserTools(identity.WithUser(context.Background(), 1), reg, server, conn); err != nil {
+		t.Fatalf("RegisterUserTools: %v", err)
+	}
+	tool, err := reg.Lookup("todoist__whoami")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	for _, step := range []struct {
+		user identity.UserID
+		want string
+	}{
+		{1, "Bearer test-token-1"},
+		{2, "Bearer test-token-2"},
+		{1, "Bearer test-token-1"}, // back to user 1: no session is shared between users
+	} {
+		if got := whoami(t, tool, step.user); got != step.want {
+			t.Errorf("user %d: server saw %q, want %q", step.user, got, step.want)
+		}
+	}
+
+	// A new token for user 1 is used from the next call on.
+	storeToken(t, st, sealer, 1, "test-token-1b")
+	if got := whoami(t, tool, 1); got != "Bearer test-token-1b" {
+		t.Errorf("after credential update: server saw %q, want the new token", got)
+	}
+}
+
+func TestMissingCredentialHidesTools(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	st := testutil.NewFakeStore()
+	sealer := testSealer(t)
+	storeToken(t, st, sealer, 1, "test-token-1") // user 2 has none
+
+	server := headerServerConfig(tokenServer(t))
+	conn := NewUserConnector(server, st, sealer)
+	t.Cleanup(conn.Close)
+	reg := tools.NewRegistry()
+	if err := RegisterUserTools(identity.WithUser(context.Background(), 1), reg, server, conn); err != nil {
+		t.Fatalf("RegisterUserTools: %v", err)
+	}
+
+	offered := func(user identity.UserID) bool {
+		for _, tool := range reg.ToolsFor(identity.WithUser(context.Background(), user), user) {
+			if tool.Name == "todoist__whoami" {
+				return true
+			}
+		}
+		return false
+	}
+	if offered(2) {
+		t.Error("tools offered to user 2, who has no stored credential")
+	}
+	if !offered(1) {
+		t.Error("tools not offered to user 1, who has a stored credential")
+	}
+
+	tool, err := reg.Lookup("todoist__whoami")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if _, err := tool.Execute(identity.WithUser(context.Background(), 2), json.RawMessage(`{}`)); err == nil {
+		t.Error("Execute for user 2 without a credential succeeded")
+	}
+
+	if !strings.Contains(logs.String(), "missing credential") || !strings.Contains(logs.String(), "todoist_token") {
+		t.Errorf("missing credential not logged with its key: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "test-token") {
+		t.Errorf("log contains a secret value: %s", logs.String())
 	}
 }
