@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/epierre/nestor/internal/identity"
@@ -93,6 +94,20 @@ func (r *Registry) Lookup(name string) (Tool, error) {
 
 // Tools returns the list of registered tools formatted for language model requests,
 // in registration order.
+// Unregister removes the tool registered under name, such as an MCP tool whose server became
+// unavailable. It reports whether there was one.
+func (r *Registry) Unregister(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.tools[name]; !ok {
+		return false
+	}
+	delete(r.tools, name)
+	delete(r.schemas, name)
+	r.order = slices.DeleteFunc(r.order, func(n string) bool { return n == name })
+	return true
+}
+
 // ToolsFor lists the tools that user may use, in registration order.
 func (r *Registry) ToolsFor(ctx context.Context, user identity.UserID) []model.Tool {
 	r.mu.RLock()

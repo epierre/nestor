@@ -87,7 +87,8 @@ type Registrar struct {
 // Register adds server's approved tools, with every call running on s. A tool that the server
 // does not offer, or whose name is already registered, is an error.
 func (r *Registrar) Register(ctx context.Context, server config.Server, s *Session) error {
-	return r.register(ctx, server, s, fixedSession{s})
+	_, err := r.register(ctx, server, s, fixedSession{s})
+	return err
 }
 
 // RegisterUser is Register for a per_user server with header delivery: each call runs on the
@@ -98,13 +99,16 @@ func (r *Registrar) RegisterUser(ctx context.Context, server config.Server, user
 	if err != nil {
 		return fmt.Errorf("server %q: %w", server.Name, err)
 	}
-	return r.register(ctx, server, listing, users)
+	_, err = r.register(ctx, server, listing, users)
+	return err
 }
 
-func (r *Registrar) register(ctx context.Context, server config.Server, listing *Session, conn connector) error {
+// register adds server's approved tools and returns the names it registered, also on error, so
+// a caller can remove them again.
+func (r *Registrar) register(ctx context.Context, server config.Server, listing *Session, conn connector) (names []string, err error) {
 	offered, err := listing.ListTools(ctx)
 	if err != nil {
-		return fmt.Errorf("server %q: %w", server.Name, err)
+		return nil, fmt.Errorf("server %q: %w", server.Name, err)
 	}
 	byName := make(map[string]*sdk.Tool, len(offered))
 	for _, t := range offered {
@@ -114,11 +118,11 @@ func (r *Registrar) register(ctx context.Context, server config.Server, listing 
 	for name, cfg := range server.Tools {
 		remote, ok := byName[name]
 		if !ok {
-			return fmt.Errorf("server %q does not offer allowlisted tool %q", server.Name, name)
+			return names, fmt.Errorf("server %q does not offer allowlisted tool %q", server.Name, name)
 		}
 		schema, err := json.Marshal(remote.InputSchema)
 		if err != nil {
-			return fmt.Errorf("server %q tool %q: marshal input schema: %w", server.Name, name, err)
+			return names, fmt.Errorf("server %q tool %q: marshal input schema: %w", server.Name, name, err)
 		}
 		live := store.ToolPin{
 			Server:      server.Name,
@@ -129,7 +133,7 @@ func (r *Registrar) register(ctx context.Context, server config.Server, listing 
 		}
 		state, err := r.Pins.RecordToolSeen(ctx, live)
 		if err != nil {
-			return fmt.Errorf("server %q tool %q: record pin: %w", server.Name, name, err)
+			return names, fmt.Errorf("server %q tool %q: record pin: %w", server.Name, name, err)
 		}
 		pin := state.Approved
 		switch {
@@ -160,10 +164,11 @@ func (r *Registrar) register(ctx context.Context, server config.Server, listing 
 			users:       server.Users,
 		}
 		if err := r.Registry.Register(adapted); err != nil {
-			return fmt.Errorf("register %q: %w", adapted.name, err)
+			return names, fmt.Errorf("register %q: %w", adapted.name, err)
 		}
+		names = append(names, adapted.name)
 	}
-	return nil
+	return names, nil
 }
 
 // adapterTool exposes one allowlisted MCP tool as a registry tool.

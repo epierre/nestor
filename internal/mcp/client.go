@@ -42,6 +42,14 @@ func (s *Session) ListTools(ctx context.Context) ([]*sdk.Tool, error) {
 	return tools, nil
 }
 
+// Ping checks that the server still answers.
+func (s *Session) Ping(ctx context.Context) error {
+	if err := s.cs.Ping(ctx, nil); err != nil {
+		return fmt.Errorf("ping mcp server: %w", err)
+	}
+	return nil
+}
+
 // Close ends the session and, for stdio, the server process.
 func (s *Session) Close() error {
 	return s.cs.Close()
