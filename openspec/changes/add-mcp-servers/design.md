@@ -97,6 +97,14 @@ Open question for `container` servers: the container needs the token when it sta
 secrets (an earlier idea here) would keep a second copy outside the encrypted store. Settle the
 token source before task 3.4 is implemented.
 
+## Reference server and startup
+
+The reference server is first-party: `cmd/mcp-timezone`, read-only, with no credentials and no
+network needs, so it can sit on an `mcp` network with no route anywhere. Nestor reads the
+reviewed `mcp.yaml` from the path in `MCP_CONFIG` (unset: no MCP servers) and runs one supervisor
+per server. Until they are implemented, `stdio` servers, `shared` credentials and `container`
+delivery stop startup instead of being skipped.
+
 ## Description pinning
 
 `mcp_tool_pins(server, tool, ...)` keeps two versions of each allowlisted tool: the **approved**
