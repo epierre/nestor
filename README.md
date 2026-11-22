@@ -211,11 +211,14 @@ docker compose -f deploy/docker-compose.yml logs nestor | grep '"request_id":"TH
 9. From an account not on the allowlist, message the bot. Nothing comes back, and the logs show
    `ignored message from unknown sender`.
 10. The logs show `mcp tool waiting for approval` for `get_time` and `convert_time`, and with
-    `ADMIN_USER_ID` set you get a Telegram message for each. Ask "what time is it in Tokyo?": the
-    reply does not use the time-zone tools.
+    `ADMIN_USER_ID` set you get a Telegram message for each. Ask "what time is it in Tokyo?".
+    The reply may well be right: every request carries the clock and your time zone, and the
+    demo `current_time` tool answers too when enabled. Judge by the tool calls, not the reply:
+    `SELECT started_at, tool_name, status FROM tool_calls ORDER BY started_at DESC LIMIT 5;`
+    (in the [database shell](#querying-the-call-and-audit-tables)) shows no `timezone__` row.
 11. Approve both tools (see [MCP servers](#mcp-servers)). Within a minute the logs show
-    `mcp tools enabled` with both names. Ask again. The reply gives the Tokyo time,
-    and `tool_calls` has a row with `tool_name` `timezone__get_time` and status `executed`.
+    `mcp tools enabled` with both names. Ask again. The same query now shows a
+    `timezone__get_time` (or `timezone__convert_time`) row with status `executed`.
 12. `docker compose -f deploy/docker-compose.yml stop mcp-timezone`, then ask "what time is it?".
     Nestor still answers (from the clock in its prompt), and the logs show
     `mcp server stopped answering`. Start it again and the tools come back without a restart.
