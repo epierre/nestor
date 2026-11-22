@@ -4,7 +4,7 @@
 
 ## 2. Client and adapter
 
-- [ ] 2.1 Connect to servers over stdio and streamable HTTP with the official SDK; list tools. Test: integration `client_test.go` against `testdata/testserver` over both transports.
+- [x] 2.1 Connect to servers over stdio and streamable HTTP with the official SDK; list tools. Test: integration `client_test.go` against `testdata/testserver` over both transports.
 - [ ] 2.2 Adapter wrapping allowlisted tools as registry tools named `<server>__<tool>` with risk from config. Test: `adapter_test.go` "only allowlisted tools registered", "risk from config ignores server annotation", "name clash with built-in".
 - [ ] 2.3 Timeout and result size cap; calls recorded in the tool call log. Test: `adapter_test.go` "timeout yields error result", "oversized result truncated with marker".
 - [ ] 2.4 Critical MCP tools go through the approval gate with a generic preview. Test: `adapter_test.go` "critical MCP tool creates pending action", using the fake server.

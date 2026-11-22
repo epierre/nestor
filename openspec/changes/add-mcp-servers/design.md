@@ -107,7 +107,7 @@ a read-only filesystem where the image allows.
 
 ## Dependencies
 
-- `github.com/modelcontextprotocol/go-sdk`: official MCP Go SDK (client side).
+- `github.com/modelcontextprotocol/go-sdk` v1.8.0 (released 2026-07-27): official MCP Go SDK (client side). Its own dependencies (`golang-jwt/jwt`, `segmentio/asm`, `x/sys`) come in transitively.
 - `gopkg.in/yaml.v3` v3.0.1: decodes `mcp.yaml`. The standard library has no YAML parser, and
   v3 supports strict decoding (`KnownFields`) so a misspelled key such as `risks` fails at startup.
 - No new runtime services beyond the MCP server containers themselves.
