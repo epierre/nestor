@@ -15,7 +15,7 @@
 - [x] 3.1 Migration `user_credentials` with AES-GCM encryption under `CREDENTIALS_KEY`; CLI to set a credential. Test: integration `credentials_test.go` "round trip", "ciphertext differs per write", "wrong key fails".
 - [x] 3.2 Per-user enablement in the tool list built for each request. Test: `agent_test.go` "server enabled for A not offered to B".
 - [x] 3.3 Per-user sessions (`ForUser`) with `header` delivery: the session for a call comes from the user in context; a user without a stored credential is not offered the server's tools. Test: `adapter_test.go` "each user served with own token" (fake server records the Authorization header per call), "missing credential hides tools"; `config_test.go` "header delivery refused for remote servers".
-- [ ] 3.4 `cmd/mcpgen` renders per-user Compose services for `container` delivery from `mcp.yaml`. Token source to be settled first (see design, Credentials). Test: `mcpgen_test.go` golden file comparison; no secret values in output.
+- [ ] 3.4 (Deferred until a server needs `container` delivery; the owner chose to settle the token source then. Until 3.4 is done, startup must not connect `container` servers.) `cmd/mcpgen` renders per-user Compose services for `container` delivery from `mcp.yaml`. Token source to be settled first (see design, Credentials). Test: `mcpgen_test.go` golden file comparison; no secret values in output.
 
 ## 4. Pinning and health
 
