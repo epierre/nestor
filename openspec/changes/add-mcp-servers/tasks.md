@@ -1,6 +1,6 @@
 ## 1. Configuration
 
-- [ ] 1.1 `internal/mcp/config`: parse and validate `mcp.yaml` (risk required, users exist, credential key for per_user, unique names, remote flag vs URL host). Test: `config_test.go` table covering each validation error and a valid file.
+- [x] 1.1 `internal/mcp/config`: parse and validate `mcp.yaml` (risk required, users exist, credential key for per_user, unique names, remote flag vs URL host). Test: `config_test.go` table covering each validation error and a valid file.
 
 ## 2. Client and adapter
 
