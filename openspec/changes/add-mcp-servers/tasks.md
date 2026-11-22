@@ -8,7 +8,7 @@
 - [x] 2.2 Adapter wrapping allowlisted tools as registry tools named `<server>__<tool>` with risk from config. Test: `adapter_test.go` "only allowlisted tools registered", "risk from config ignores server annotation", "name clash with built-in".
 - [x] 2.3 Timeout and result size cap; calls recorded in the tool call log. Test: `adapter_test.go` "timeout yields error result", "oversized result truncated with marker".
 - [x] 2.3a Record a truncated MCP result as `truncated`: migration `0008_tool_calls_truncated` adds `truncated` to the `tool_calls.status` check, and the adapter signals truncation so the agent records that status. Test: integration `store_test.go` "truncated status accepted"; `agent_test.go` "truncated MCP result recorded as truncated".
-- [ ] 2.4 Critical MCP tools go through the approval gate with a generic preview. Test: `adapter_test.go` "critical MCP tool creates pending action", using the fake server.
+- [x] 2.4 Critical MCP tools go through the approval gate with a generic preview. Test: `adapter_test.go` "critical MCP tool creates pending action", using the fake server.
 
 ## 3. Users and credentials
 

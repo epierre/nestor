@@ -9,7 +9,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/epierre/nestor/internal/approval"
+	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/mcp/config"
+	"github.com/epierre/nestor/internal/store"
+	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -221,5 +225,35 @@ func TestExecuteTruncatesOversizedResult(t *testing.T) {
 	}
 	if !utf8.ValidString(res.Content) {
 		t.Error("truncation split a multi-byte character")
+	}
+}
+
+func TestCriticalToolCreatesPendingAction(t *testing.T) {
+	ctx := identity.WithUser(context.Background(), 1)
+	st := testutil.NewFakeStore()
+	reg := tools.NewRegistry()
+	server := weatherServer(map[string]config.Tool{"delete_task": {Risk: tools.RiskCritical}})
+	if err := RegisterTools(ctx, reg, server, fakeServer(t)); err != nil {
+		t.Fatalf("RegisterTools: %v", err)
+	}
+	tool, err := reg.Lookup("weather__delete_task")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	gate := approval.New(st, reg, time.Hour)
+	args := json.RawMessage(`{"id":"42","note":"secret-sentinel"}`)
+	action, err := gate.Propose(ctx, 1, tool, args)
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if action.State != store.PendingProposed {
+		t.Errorf("state = %q, want %q", action.State, store.PendingProposed)
+	}
+	if action.ToolName != "weather__delete_task" {
+		t.Errorf("tool name = %q, want weather__delete_task", action.ToolName)
+	}
+	if strings.Contains(action.Preview, "secret-sentinel") {
+		t.Errorf("preview shows server-controlled arguments: %q", action.Preview)
 	}
 }
