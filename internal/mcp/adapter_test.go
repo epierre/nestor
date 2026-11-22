@@ -257,3 +257,39 @@ func TestCriticalToolCreatesPendingAction(t *testing.T) {
 		t.Errorf("preview shows server-controlled arguments: %q", action.Preview)
 	}
 }
+
+func TestEnabledForUsers(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name  string
+		users []string
+		user  identity.UserID
+		want  bool
+	}{
+		{"wildcard enables any user", []string{"*"}, 2, true},
+		{"listed user enabled", []string{"1"}, 1, true},
+		{"unlisted user not enabled", []string{"1"}, 2, false},
+		{"no users enables nobody", nil, 1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := tools.NewRegistry()
+			server := weatherServer(map[string]config.Tool{"get_tasks": {Risk: tools.RiskRead}})
+			server.Users = tt.users
+			if err := RegisterTools(ctx, reg, server, fakeServer(t)); err != nil {
+				t.Fatalf("RegisterTools: %v", err)
+			}
+			tool, err := reg.Lookup("weather__get_tasks")
+			if err != nil {
+				t.Fatalf("Lookup: %v", err)
+			}
+			scoped, ok := tool.(tools.UserScoped)
+			if !ok {
+				t.Fatal("adapted tool does not implement tools.UserScoped")
+			}
+			if got := scoped.EnabledFor(tt.user); got != tt.want {
+				t.Errorf("EnabledFor(%d) = %v, want %v", tt.user, got, tt.want)
+			}
+		})
+	}
+}

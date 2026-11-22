@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -92,6 +93,26 @@ func (r *Registry) Lookup(name string) (Tool, error) {
 
 // Tools returns the list of registered tools formatted for language model requests,
 // in registration order.
+// ToolsFor lists the tools that user may use, in registration order.
+func (r *Registry) ToolsFor(user identity.UserID) []model.Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]model.Tool, 0, len(r.order))
+	for _, name := range r.order {
+		t := r.tools[name]
+		if !Enabled(t, user) {
+			continue
+		}
+		out = append(out, model.Tool{
+			Name:        t.Name(),
+			Description: t.Description(),
+			Parameters:  t.Schema(),
+		})
+	}
+	return out
+}
+
 func (r *Registry) Tools() []model.Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -144,8 +165,9 @@ func (r *Registry) AgentView() *AgentView {
 	return &AgentView{reg: r}
 }
 
-func (v *AgentView) Tools() []model.Tool {
-	return v.reg.Tools()
+// ToolsFor lists the tools offered to user in a model request.
+func (v *AgentView) ToolsFor(user identity.UserID) []model.Tool {
+	return v.reg.ToolsFor(user)
 }
 
 func (v *AgentView) Lookup(name string) (Tool, error) {
@@ -165,6 +187,11 @@ func (v *AgentView) Validate(name string, args json.RawMessage) error {
 
 type refusingTool struct {
 	Tool
+}
+
+// EnabledFor keeps the wrapped tool's user scope. The embedded interface would otherwise hide it.
+func (r refusingTool) EnabledFor(user identity.UserID) bool {
+	return Enabled(r.Tool, user)
 }
 
 func (r *refusingTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {

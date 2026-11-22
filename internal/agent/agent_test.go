@@ -1694,3 +1694,85 @@ func TestTruncatedMCPResultRecordedAsTruncated(t *testing.T) {
 		t.Errorf("recorded status %q, want %q", recorded[0].Status, store.ToolCallStatusTruncated)
 	}
 }
+
+// scopedTool is an MCP-style tool enabled for one user. It counts its executions.
+type scopedTool struct {
+	enabledFor identity.UserID
+	executed   *int
+}
+
+func (scopedTool) Name() string                            { return "weather__get_forecast" }
+func (scopedTool) Description() string                     { return "forecast for one user" }
+func (scopedTool) Schema() json.RawMessage                 { return json.RawMessage(`{"type":"object"}`) }
+func (scopedTool) Risk() tools.Risk                        { return tools.RiskRead }
+func (scopedTool) Preview(json.RawMessage) (string, error) { return "", nil }
+func (s scopedTool) EnabledFor(user identity.UserID) bool  { return user == s.enabledFor }
+func (s scopedTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
+	*s.executed++
+	return tools.Result{Content: "sunny"}, nil
+}
+
+func TestServerEnabledForAUserNotOfferedToAnother(t *testing.T) {
+	const forecast = "weather__get_forecast"
+	hasTool := func(list []model.Tool, name string) bool {
+		for _, tool := range list {
+			if tool.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("tool list differs per user", func(t *testing.T) {
+		executed := 0
+		reg := tools.NewRegistry()
+		if err := reg.Register(scopedTool{enabledFor: 1, executed: &executed}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		opts := testOptions()
+		opts.Tools = reg
+
+		client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+			return model.CompletionResponse{Content: "ok"}, nil
+		}}
+		a := New(client, testutil.NewFakeStore(), opts)
+
+		send(t, a, 2, "forecast?")
+		if hasTool(lastRequest(t, client).Tools, forecast) {
+			t.Error("user 2's request offers the server's tool, which is enabled for user 1 only")
+		}
+		send(t, a, 1, "forecast?")
+		if !hasTool(lastRequest(t, client).Tools, forecast) {
+			t.Error("user 1's request does not offer the server's tool")
+		}
+	})
+
+	t.Run("call by a user it is not enabled for is refused", func(t *testing.T) {
+		executed := 0
+		reg := tools.NewRegistry()
+		if err := reg.Register(scopedTool{enabledFor: 1, executed: &executed}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		call := model.ToolCall{ID: "call_forecast", Name: forecast, Arguments: json.RawMessage(`{}`)}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "I cannot."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+		opts := testOptions()
+		opts.Tools = reg
+		st := testutil.NewFakeStore()
+		a := New(client, st, opts)
+
+		send(t, a, 2, "forecast?")
+		if executed != 0 {
+			t.Errorf("tool executed %d times for a user it is not enabled for", executed)
+		}
+		recorded := st.ToolCalls(2)
+		if len(recorded) != 1 || recorded[0].Status != store.ToolCallStatusRejected {
+			t.Errorf("recorded calls for user 2 = %+v, want one rejected call", recorded)
+		}
+	})
+}

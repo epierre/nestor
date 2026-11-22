@@ -30,7 +30,7 @@ const (
 
 // ToolRegistry looks up tools and lists them for the model.
 type ToolRegistry interface {
-	Tools() []model.Tool
+	ToolsFor(user identity.UserID) []model.Tool
 	Lookup(name string) (tools.Tool, error)
 	Validate(name string, args json.RawMessage) error
 }
@@ -120,7 +120,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 	messages := a.prompt(history, conversation.StartedAt, proposed)
 	var modelTools []model.Tool
 	if a.opts.Tools != nil {
-		modelTools = a.opts.Tools.Tools()
+		modelTools = a.opts.Tools.ToolsFor(user)
 	}
 
 	for range a.opts.MaxIterations {
@@ -230,6 +230,10 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 	for _, call := range resp.ToolCalls {
 		start := time.Now()
 		tool, err := a.opts.Tools.Lookup(call.Name)
+		if err == nil && !tools.Enabled(tool, user) {
+			// Offered to other users only. Treated as unknown so the model learns nothing more.
+			err = tools.ErrNotFound
+		}
 		var (
 			content    string
 			status     string

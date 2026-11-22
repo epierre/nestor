@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/mcp/config"
 	"github.com/epierre/nestor/internal/tools"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -55,6 +57,7 @@ func RegisterTools(ctx context.Context, reg *tools.Registry, server config.Serve
 			session:  s,
 			timeout:  orDefault(server.Timeout, defaultTimeout),
 			maxBytes: orDefault(server.MaxResultBytes, defaultMaxResultBytes),
+			users:    server.Users,
 		}
 		if err := reg.Register(adapted); err != nil {
 			return fmt.Errorf("register %q: %w", adapted.name, err)
@@ -73,6 +76,20 @@ type adapterTool struct {
 	session  *Session
 	timeout  time.Duration
 	maxBytes int
+	users    []string // the server's users list from mcp.yaml: user IDs, or "*"
+}
+
+// EnabledFor reports whether the server is enabled for user, by the users list in mcp.yaml.
+func (t *adapterTool) EnabledFor(user identity.UserID) bool {
+	for _, u := range t.users {
+		if u == "*" {
+			return true
+		}
+		if id, err := strconv.ParseInt(u, 10, 64); err == nil && identity.UserID(id) == user {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *adapterTool) Name() string            { return t.name }

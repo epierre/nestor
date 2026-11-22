@@ -13,7 +13,7 @@
 ## 3. Users and credentials
 
 - [x] 3.1 Migration `user_credentials` with AES-GCM encryption under `CREDENTIALS_KEY`; CLI to set a credential. Test: integration `credentials_test.go` "round trip", "ciphertext differs per write", "wrong key fails".
-- [ ] 3.2 Per-user enablement in the tool list built for each request. Test: `agent_test.go` "server enabled for A not offered to B".
+- [x] 3.2 Per-user enablement in the tool list built for each request. Test: `agent_test.go` "server enabled for A not offered to B".
 - [ ] 3.3 Per-user server connections (`ForUser`) and missing-credential handling. Test: `adapter_test.go` "each user served with own token" (fake server records token), "missing credential hides tools".
 - [ ] 3.4 `cmd/mcpgen` renders per-user Compose services from `mcp.yaml` using Docker secrets. Test: `mcpgen_test.go` golden file comparison; no secret values in output.
 
