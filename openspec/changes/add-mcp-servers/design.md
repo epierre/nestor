@@ -99,13 +99,22 @@ token source before task 3.4 is implemented.
 
 ## Description pinning
 
-On first approval of a tool, its description and input schema are hashed and stored in
-`mcp_tool_pins(server, tool, description, schema_json, hash, approved_at)`. At every connect
-the adapter lists the server's tools and compares. A mismatch disables that tool (it disappears
-from model requests), logs an error, and sends the host admin a Telegram message showing the old
-and new description. `nestor mcp approve <server> <tool>` re-pins after review.
+`mcp_tool_pins(server, tool, ...)` keeps two versions of each allowlisted tool: the **approved**
+one (description, input schema, their hash, `approved_at`; empty until the first approval) and
+the latest one **seen** on connect. At every connect the adapter records what it sees:
 
-The model always receives the pinned description, never a live one.
+- Never approved: the tool stays out of model requests. The host admin gets a Telegram message
+  with its description and the approve command.
+- Approved and the seen hash matches: the tool is registered with the approved description and
+  schema.
+- Approved but the seen hash differs: the tool is disabled, an error is logged, and the admin
+  gets a message with the old and new description.
+
+The admin is messaged once per newly seen version, not on every connect.
+`nestor mcp approve <server> <tool>` approves the version last seen; the tool is offered from the
+next connect on (startup, or reconnect after a health check).
+
+The model always receives the approved description and schema, never live ones.
 
 The "host admin" is the internal user ID in `ADMIN_USER_ID` (the owner in v1). Admin is an
 operational role for alerts and CLI commands only; it grants no access to other users' data.
