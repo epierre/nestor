@@ -72,7 +72,7 @@ func weatherServer(tools map[string]config.Tool) config.Server {
 func executeOne(t *testing.T, server config.Server, name string) (tools.Result, error) {
 	t.Helper()
 	reg := tools.NewRegistry()
-	if err := RegisterTools(context.Background(), reg, server, fakeServer(t)); err != nil {
+	if err := RegisterTools(context.Background(), reg, newPins(), server, fakeServer(t)); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 	tool, err := reg.Lookup(server.Name + "__" + name)
@@ -122,7 +122,7 @@ func TestRegisterAllowlistedTools(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := tools.NewRegistry()
-			err := RegisterTools(ctx, reg, tt.server, fakeServer(t))
+			err := RegisterTools(ctx, reg, newPins(), tt.server, fakeServer(t))
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("RegisterTools error = %v, want containing %q", err, tt.wantErr)
@@ -147,7 +147,7 @@ func TestRegisterAllowlistedTools(t *testing.T) {
 func TestRiskFromConfigIgnoresAnnotation(t *testing.T) {
 	reg := tools.NewRegistry()
 	server := weatherServer(map[string]config.Tool{"delete_task": {Risk: tools.RiskCritical}})
-	if err := RegisterTools(context.Background(), reg, server, fakeServer(t)); err != nil {
+	if err := RegisterTools(context.Background(), reg, newPins(), server, fakeServer(t)); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func TestNameClashWithBuiltin(t *testing.T) {
 	}
 	server := weatherServer(map[string]config.Tool{"get_tasks": {Risk: tools.RiskRead}})
 
-	err := RegisterTools(context.Background(), reg, server, fakeServer(t))
+	err := RegisterTools(context.Background(), reg, newPins(), server, fakeServer(t))
 	if !errors.Is(err, tools.ErrAlreadyExists) {
 		t.Fatalf("RegisterTools error = %v, want ErrAlreadyExists", err)
 	}
@@ -184,7 +184,7 @@ func TestNameClashWithBuiltin(t *testing.T) {
 func TestExecuteForwardsCall(t *testing.T) {
 	reg := tools.NewRegistry()
 	server := weatherServer(map[string]config.Tool{"get_tasks": {Risk: tools.RiskRead}})
-	if err := RegisterTools(context.Background(), reg, server, fakeServer(t)); err != nil {
+	if err := RegisterTools(context.Background(), reg, newPins(), server, fakeServer(t)); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 	tool, err := reg.Lookup("weather__get_tasks")
@@ -238,7 +238,7 @@ func TestCriticalToolCreatesPendingAction(t *testing.T) {
 	st := testutil.NewFakeStore()
 	reg := tools.NewRegistry()
 	server := weatherServer(map[string]config.Tool{"delete_task": {Risk: tools.RiskCritical}})
-	if err := RegisterTools(ctx, reg, server, fakeServer(t)); err != nil {
+	if err := RegisterTools(ctx, reg, newPins(), server, fakeServer(t)); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 	tool, err := reg.Lookup("weather__delete_task")
@@ -281,7 +281,7 @@ func TestEnabledForUsers(t *testing.T) {
 			reg := tools.NewRegistry()
 			server := weatherServer(map[string]config.Tool{"get_tasks": {Risk: tools.RiskRead}})
 			server.Users = tt.users
-			if err := RegisterTools(ctx, reg, server, fakeServer(t)); err != nil {
+			if err := RegisterTools(ctx, reg, newPins(), server, fakeServer(t)); err != nil {
 				t.Fatalf("RegisterTools: %v", err)
 			}
 			tool, err := reg.Lookup("weather__get_tasks")
@@ -370,7 +370,7 @@ func TestEachUserServedWithOwnToken(t *testing.T) {
 	conn := NewUserConnector(server, st, sealer)
 	t.Cleanup(conn.Close)
 	reg := tools.NewRegistry()
-	if err := RegisterUserTools(identity.WithUser(context.Background(), 1), reg, server, conn); err != nil {
+	if err := RegisterUserTools(identity.WithUser(context.Background(), 1), reg, newPins(), server, conn); err != nil {
 		t.Fatalf("RegisterUserTools: %v", err)
 	}
 	tool, err := reg.Lookup("todoist__whoami")
@@ -412,7 +412,7 @@ func TestMissingCredentialHidesTools(t *testing.T) {
 	conn := NewUserConnector(server, st, sealer)
 	t.Cleanup(conn.Close)
 	reg := tools.NewRegistry()
-	if err := RegisterUserTools(identity.WithUser(context.Background(), 1), reg, server, conn); err != nil {
+	if err := RegisterUserTools(identity.WithUser(context.Background(), 1), reg, newPins(), server, conn); err != nil {
 		t.Fatalf("RegisterUserTools: %v", err)
 	}
 

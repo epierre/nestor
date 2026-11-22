@@ -19,7 +19,7 @@
 
 ## 4. Pinning and health
 
-- [ ] 4.1 Migration `mcp_tool_pins`; pin on first approval; compare on connect; model gets pinned description. Test: `pins_test.go` "first connect pins", "changed description disables tool", "model sees pinned not live text".
+- [x] 4.1 Migration `mcp_tool_pins`; pin on first approval; compare on connect; model gets pinned description. Test: `pins_test.go` "first connect pins", "changed description disables tool", "model sees pinned not live text".
 - [ ] 4.2 Admin alert on mismatch and `mcp approve` command. Test: `pins_test.go` "re-approve re-enables tool", `telegram_test.go` "admin alert shows old and new".
 - [ ] 4.3 Health checks with backoff; unavailable server removes only its tools. Test: `health_test.go` "down server tools absent", "recovery re-adds after pin check".
 

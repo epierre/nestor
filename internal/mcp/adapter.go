@@ -2,9 +2,12 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/mcp/config"
+	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/tools"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -25,6 +29,13 @@ const (
 	defaultTimeout        = 10 * time.Second
 	defaultMaxResultBytes = 64 << 10
 )
+
+// PinStore records the description and schema an MCP tool was first trusted with.
+// postgres.Store implements it.
+type PinStore interface {
+	// PinTool stores pin unless the tool is already pinned, and returns the stored pin.
+	PinTool(ctx context.Context, pin store.ToolPin) (store.ToolPin, error)
+}
 
 // connector gives the session a call runs on.
 type connector interface {
@@ -44,22 +55,25 @@ func (f fixedSession) sessionFor(context.Context) (*Session, error) { return f.s
 // RegisterTools adds every tool allowlisted for server to reg, named <server>__<tool>, with every
 // call running on s. Risk comes from the configuration; annotations the server sends are ignored.
 // A tool that the server does not offer, or whose name is already registered, is an error.
-func RegisterTools(ctx context.Context, reg *tools.Registry, server config.Server, s *Session) error {
-	return registerTools(ctx, reg, server, s, fixedSession{s})
+func RegisterTools(ctx context.Context, reg *tools.Registry, pins PinStore, server config.Server, s *Session) error {
+	return registerTools(ctx, reg, pins, server, s, fixedSession{s})
 }
 
 // RegisterUserTools is RegisterTools for a per_user server with header delivery: each call runs on
 // the session of the user in its context. The tool list is read as the user in ctx, who must have
 // a stored credential.
-func RegisterUserTools(ctx context.Context, reg *tools.Registry, server config.Server, users *UserConnector) error {
+func RegisterUserTools(ctx context.Context, reg *tools.Registry, pins PinStore, server config.Server, users *UserConnector) error {
 	listing, err := users.sessionFor(ctx)
 	if err != nil {
 		return fmt.Errorf("server %q: %w", server.Name, err)
 	}
-	return registerTools(ctx, reg, server, listing, users)
+	return registerTools(ctx, reg, pins, server, listing, users)
 }
 
-func registerTools(ctx context.Context, reg *tools.Registry, server config.Server, listing *Session, conn connector) error {
+// registerTools pins each allowlisted tool on first sight and registers it with the pinned
+// description and schema. A tool whose live description or schema no longer matches its pin is
+// left out and logged; the other tools of the server are still registered.
+func registerTools(ctx context.Context, reg *tools.Registry, pins PinStore, server config.Server, listing *Session, conn connector) error {
 	offered, err := listing.ListTools(ctx)
 	if err != nil {
 		return fmt.Errorf("server %q: %w", server.Name, err)
@@ -78,16 +92,33 @@ func registerTools(ctx context.Context, reg *tools.Registry, server config.Serve
 		if err != nil {
 			return fmt.Errorf("server %q tool %q: marshal input schema: %w", server.Name, name, err)
 		}
+		live := store.ToolPin{
+			Server:      server.Name,
+			Tool:        name,
+			Description: remote.Description,
+			SchemaJSON:  schema,
+			Hash:        pinHash(remote.Description, schema),
+		}
+		pin, err := pins.PinTool(ctx, live)
+		if err != nil {
+			return fmt.Errorf("server %q tool %q: pin: %w", server.Name, name, err)
+		}
+		if pin.Hash != live.Hash {
+			slog.ErrorContext(ctx, "mcp tool pin mismatch: tool disabled until re-approved",
+				"server", server.Name, "tool", name, "pinned_hash", pin.Hash, "live_hash", live.Hash)
+			continue
+		}
 		adapted := &adapterTool{
-			server:   server.Name,
-			remote:   name,
-			name:     server.Name + namespaceSep + name,
-			risk:     cfg.Risk,
-			schema:   schema,
-			conn:     conn,
-			timeout:  orDefault(server.Timeout, defaultTimeout),
-			maxBytes: orDefault(server.MaxResultBytes, defaultMaxResultBytes),
-			users:    server.Users,
+			server:      server.Name,
+			remote:      name,
+			name:        server.Name + namespaceSep + name,
+			risk:        cfg.Risk,
+			description: pin.Description,
+			schema:      pin.SchemaJSON,
+			conn:        conn,
+			timeout:     orDefault(server.Timeout, defaultTimeout),
+			maxBytes:    orDefault(server.MaxResultBytes, defaultMaxResultBytes),
+			users:       server.Users,
 		}
 		if err := reg.Register(adapted); err != nil {
 			return fmt.Errorf("register %q: %w", adapted.name, err)
@@ -98,15 +129,17 @@ func registerTools(ctx context.Context, reg *tools.Registry, server config.Serve
 
 // adapterTool exposes one allowlisted MCP tool as a registry tool.
 type adapterTool struct {
-	server   string
-	remote   string // the tool's name on the server
-	name     string // the registered name, <server>__<remote>
-	risk     tools.Risk
-	schema   json.RawMessage
-	conn     connector
-	timeout  time.Duration
-	maxBytes int
-	users    []string // the server's users list from mcp.yaml: user IDs, or "*"
+	server string
+	remote string // the tool's name on the server
+	name   string // the registered name, <server>__<remote>
+	risk   tools.Risk
+	// description and schema are the pinned ones; the live text is never sent to the model.
+	description string
+	schema      json.RawMessage
+	conn        connector
+	timeout     time.Duration
+	maxBytes    int
+	users       []string // the server's users list from mcp.yaml: user IDs, or "*"
 }
 
 // EnabledFor reports whether the server is enabled for user by the users list in mcp.yaml and, for
@@ -134,7 +167,7 @@ func (t *adapterTool) listed(user identity.UserID) bool {
 }
 
 func (t *adapterTool) Name() string            { return t.name }
-func (t *adapterTool) Description() string     { return "MCP tool " + t.remote + " on server " + t.server }
+func (t *adapterTool) Description() string     { return t.description }
 func (t *adapterTool) Schema() json.RawMessage { return t.schema }
 func (t *adapterTool) Risk() tools.Risk        { return t.risk }
 
@@ -180,6 +213,15 @@ func capResult(text string, max int) (string, bool) {
 		cut--
 	}
 	return fmt.Sprintf("%s\n[truncated: %d bytes omitted]", text[:cut], len(text)-cut), true
+}
+
+// pinHash identifies a tool's description and schema together.
+func pinHash(description string, schema []byte) string {
+	h := sha256.New()
+	h.Write([]byte(description))
+	h.Write([]byte{0})
+	h.Write(schema)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func orDefault[T comparable](v, fallback T) T {

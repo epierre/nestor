@@ -168,6 +168,17 @@ var ErrReminderNotFound = errors.New("reminder not found")
 // ErrCredentialNotFound is returned when user has no stored credential under that key.
 var ErrCredentialNotFound = errors.New("credential not found")
 
+// ToolPin is the description and input schema of an MCP tool as recorded when it was first
+// trusted. It is host-wide configuration, not user data. Hash covers both description and schema.
+type ToolPin struct {
+	Server      string
+	Tool        string
+	Description string
+	SchemaJSON  json.RawMessage
+	Hash        string
+	ApprovedAt  time.Time
+}
+
 // Credential is an encrypted per-user secret as stored. Open it with internal/credentials.
 type Credential struct {
 	Ciphertext []byte
