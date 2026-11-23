@@ -28,6 +28,7 @@ import (
 	mcpconfig "github.com/epierre/nestor/internal/mcp/config"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/obs"
+	"github.com/epierre/nestor/internal/skills"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
@@ -1845,5 +1846,52 @@ func TestMCPToolCalledThroughTheAgent(t *testing.T) {
 	}
 	if calls := st.ToolCalls(1); len(calls) != 1 || calls[0].Status != store.ToolCallStatusExecuted || calls[0].ToolName != "timezone__get_time" {
 		t.Errorf("recorded tool calls = %+v, want one executed timezone__get_time", calls)
+	}
+}
+
+func TestSkillsListedNotLoaded(t *testing.T) {
+	opts := testOptions()
+	opts.Skills = skills.NewCatalog([]skills.Loaded{
+		{
+			Entry: skills.Entry{Name: "weekly-review", Users: []string{"*"}},
+			Skill: skills.Skill{Name: "weekly-review", Description: "Run my weekly review.", Instructions: "WEEKLY-INSTRUCTIONS"},
+		},
+		{
+			Entry: skills.Entry{Name: "newsletter-triage", Users: []string{"1"}},
+			Skill: skills.Skill{Name: "newsletter-triage", Description: "Sort newsletters.", Instructions: "TRIAGE-INSTRUCTIONS"},
+		},
+	})
+	client := numberedReplies()
+	a := New(client, testutil.NewFakeStore(), opts)
+
+	tests := []struct {
+		user    identity.UserID
+		want    []string
+		notWant []string
+	}{
+		{1, []string{"be helpful", "weekly-review", "Run my weekly review.", "newsletter-triage", "Sort newsletters."},
+			[]string{"WEEKLY-INSTRUCTIONS", "TRIAGE-INSTRUCTIONS"}},
+		{2, []string{"be helpful", "weekly-review", "Run my weekly review."},
+			[]string{"newsletter-triage", "WEEKLY-INSTRUCTIONS", "TRIAGE-INSTRUCTIONS"}},
+	}
+	for _, tt := range tests {
+		send(t, a, tt.user, "hello")
+		req := lastRequest(t, client)
+		sys := req.Messages[0]
+		if sys.Role != model.RoleSystem {
+			t.Fatalf("first message role = %q, want system", sys.Role)
+		}
+		for _, w := range tt.want {
+			if !strings.Contains(sys.Content, w) {
+				t.Errorf("user %d: system prompt %q lacks %q", tt.user, sys.Content, w)
+			}
+		}
+		for _, m := range req.Messages {
+			for _, w := range tt.notWant {
+				if strings.Contains(m.Content, w) {
+					t.Errorf("user %d: %s message contains %q", tt.user, m.Role, w)
+				}
+			}
+		}
 	}
 }

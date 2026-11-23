@@ -24,6 +24,7 @@ import (
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/reminders"
+	"github.com/epierre/nestor/internal/skills"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/store/postgres"
 	"github.com/epierre/nestor/internal/tasks"
@@ -109,6 +110,7 @@ func run() error {
 	bot.SetDecider(gate)
 	go reminders.Run(ctx, st, bot, reminderTick)
 	opts := agentOptions(cfg, registry, loc)
+	opts.Skills = skills.NewCatalog(loadedSkills)
 	opts.Approvals = gate
 	opts.Cards = bot
 	opts.Notices = bot
