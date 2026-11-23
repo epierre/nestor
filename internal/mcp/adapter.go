@@ -1,16 +1,20 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/epierre/nestor/internal/identity"
@@ -212,9 +216,182 @@ func (t *adapterTool) Description() string     { return t.description }
 func (t *adapterTool) Schema() json.RawMessage { return t.schema }
 func (t *adapterTool) Risk() tools.Risk        { return t.risk }
 
-// Preview is generic for now: it names the tool and shows nothing the server controls.
-func (t *adapterTool) Preview(json.RawMessage) (string, error) {
-	return "MCP tool " + t.name, nil
+// Preview renders the namespaced tool name and, when non-empty, sorted key: <json> lines
+// without echoing untrusted argument content on validation failures.
+func (t *adapterTool) Preview(args json.RawMessage) (string, error) {
+	header := "tool " + t.name
+	if len(bytes.TrimSpace(args)) == 0 {
+		return header, nil
+	}
+	obj, err := parseStrictJSONObject(args)
+	if err != nil {
+		return "", err
+	}
+	if len(obj) == 0 {
+		return header, nil
+	}
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	var b strings.Builder
+	b.WriteString(header)
+	for _, k := range keys {
+		renderedKey, err := formatPreviewKey(k)
+		if err != nil {
+			return "", fmt.Errorf("%w: invalid preview key", tools.ErrValidation)
+		}
+		renderedVal, err := encodeCompactJSON(obj[k])
+		if err != nil {
+			return "", fmt.Errorf("%w: invalid preview value", tools.ErrValidation)
+		}
+		b.WriteByte('\n')
+		b.WriteString(renderedKey)
+		b.WriteString(": ")
+		b.WriteString(renderedVal)
+	}
+	return b.String(), nil
+}
+
+func parseStrictJSONObject(raw json.RawMessage) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return nil, fmt.Errorf("%w: arguments must be a JSON object", tools.ErrValidation)
+	}
+	obj, err := decodeStrictObjectBody(dec)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("%w: trailing JSON tokens", tools.ErrValidation)
+		}
+		return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+	}
+	return obj, nil
+}
+
+func decodeStrictObjectBody(dec *json.Decoder) (map[string]any, error) {
+	obj := make(map[string]any)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+		}
+		if _, dup := obj[key]; dup {
+			return nil, fmt.Errorf("%w: duplicate JSON key", tools.ErrValidation)
+		}
+		val, err := decodeStrictValue(dec)
+		if err != nil {
+			return nil, err
+		}
+		obj[key] = val
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '}' {
+		return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+	}
+	return obj, nil
+}
+
+func decodeStrictValue(dec *json.Decoder) (any, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return tok, nil
+	}
+	switch delim {
+	case '{':
+		return decodeStrictObjectBody(dec)
+	case '[':
+		arr := make([]any, 0)
+		for dec.More() {
+			elem, err := decodeStrictValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			arr = append(arr, elem)
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+		}
+		if endDelim, ok := end.(json.Delim); !ok || endDelim != ']' {
+			return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+		}
+		return arr, nil
+	default:
+		return nil, fmt.Errorf("%w: invalid JSON", tools.ErrValidation)
+	}
+}
+
+func encodeCompactJSON(v any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(buf.String(), "\n"), nil
+}
+
+func formatPreviewKey(k string) (string, error) {
+	if isSafePreviewKey(k) {
+		return k, nil
+	}
+	quoted, err := encodeCompactJSON(k)
+	if err != nil {
+		return "", err
+	}
+	return escapeKeyFormatChars(quoted), nil
+}
+
+func isSafePreviewKey(k string) bool {
+	if k == "" || strings.TrimSpace(k) != k {
+		return false
+	}
+	for _, r := range k {
+		if r == ':' || r == '"' || unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Cf, r) {
+			return false
+		}
+	}
+	return true
+}
+
+func escapeKeyFormatChars(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Cf, r) {
+			if r <= 0xFFFF {
+				fmt.Fprintf(&b, "\\u%04x", r)
+			} else {
+				r1, r2 := utf16.EncodeRune(r)
+				fmt.Fprintf(&b, "\\u%04x\\u%04x", r1, r2)
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // Execute calls the tool under the server's timeout. A timeout or a transport failure is an error;

@@ -258,9 +258,105 @@ func TestCriticalToolCreatesPendingAction(t *testing.T) {
 	if action.ToolName != "weather__delete_task" {
 		t.Errorf("tool name = %q, want weather__delete_task", action.ToolName)
 	}
-	if strings.Contains(action.Preview, "secret-sentinel") {
-		t.Errorf("preview shows server-controlled arguments: %q", action.Preview)
+	wantPreview := "tool weather__delete_task\nid: \"42\"\nnote: \"secret-sentinel\""
+	if action.Preview != wantPreview {
+		t.Errorf("preview = %q, want %q", action.Preview, wantPreview)
 	}
+}
+
+func TestAdapterToolPreview(t *testing.T) {
+	ctx := context.Background()
+	reg := tools.NewRegistry()
+	server := weatherServer(map[string]config.Tool{"delete_task": {Risk: tools.RiskCritical}})
+	if err := approved(reg).Register(ctx, server, fakeServer(t)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	tool, err := reg.Lookup("weather__delete_task")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	t.Run("renders valid and empty arguments", func(t *testing.T) {
+		tests := []struct {
+			name string
+			args json.RawMessage
+			want string
+		}{
+			{
+				name: "nil args",
+				args: nil,
+				want: "tool weather__delete_task",
+			},
+			{
+				name: "empty args",
+				args: json.RawMessage(``),
+				want: "tool weather__delete_task",
+			},
+			{
+				name: "whitespace args",
+				args: json.RawMessage(" \n\t "),
+				want: "tool weather__delete_task",
+			},
+			{
+				name: "empty object",
+				args: json.RawMessage(`{}`),
+				want: "tool weather__delete_task",
+			},
+			{
+				name: "sorted keys, exact 64-bit integer, unescaped HTML, compact nested JSON",
+				args: json.RawMessage(`{"reason": "duplicate & <obsolete>", "id": 9007199254740993, "meta": {"note": "line1\nline2", "tags": ["a", "b"]}}`),
+				want: "tool weather__delete_task\nid: 9007199254740993\nmeta: {\"note\":\"line1\\nline2\",\"tags\":[\"a\",\"b\"]}\nreason: \"duplicate & <obsolete>\"",
+			},
+			{
+				name: "unsafe keys are quoted and escaped",
+				args: json.RawMessage(`{"": 0, "a\nb": 1, "x:y": 2, " padded ": 3, "ctrl\u0007": 4, "bidi\u202e": 5}`),
+				want: "tool weather__delete_task\n\"\": 0\n\" padded \": 3\n\"a\\nb\": 1\n\"bidi\\u202e\": 5\n\"ctrl\\u0007\": 4\n\"x:y\": 2",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				got, err := tool.Preview(tt.args)
+				if err != nil {
+					t.Fatalf("Preview(%s): %v", tt.args, err)
+				}
+				if got != tt.want {
+					t.Errorf("Preview = %q, want %q", got, tt.want)
+				}
+			})
+		}
+	})
+
+	t.Run("rejects malformed or ambiguous JSON without echoing values", func(t *testing.T) {
+		tests := []struct {
+			name string
+			args json.RawMessage
+		}{
+			{"top-level duplicate", json.RawMessage(`{"k":"secret-val","k":"other"}`)},
+			{"nested duplicate", json.RawMessage(`{"outer":{"k":"secret-val","k":"other"}}`)},
+			{"array object duplicate", json.RawMessage(`{"items":[{"k":"secret-val","k":"other"}]}`)},
+			{"unicode escaped duplicate", json.RawMessage(`{"id":"secret-val","\u0069d":"other"}`)},
+			{"non-object root array", json.RawMessage(`["secret-val"]`)},
+			{"non-object root string", json.RawMessage(`"secret-val"`)},
+			{"invalid JSON", json.RawMessage(`{"k":"secret-val"`)},
+			{"trailing token", json.RawMessage(`{"k":"secret-val"}{}`)},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				_, err := tool.Preview(tt.args)
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !errors.Is(err, tools.ErrValidation) {
+					t.Errorf("err = %v, want ErrValidation", err)
+				}
+				if strings.Contains(err.Error(), "secret-val") {
+					t.Errorf("error %q leaked argument value", err.Error())
+				}
+			})
+		}
+	})
 }
 
 func TestEnabledForUsers(t *testing.T) {
