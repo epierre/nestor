@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"sync"
 
@@ -144,7 +145,8 @@ func (r *Registry) Tools() []model.Tool {
 	return out
 }
 
-// Validate checks that args match the registered tool's JSON Schema.
+// Validate checks that args are a strict JSON object with no duplicate keys or trailing tokens,
+// and match the registered tool's JSON Schema when one is compiled.
 func (r *Registry) Validate(name string, args json.RawMessage) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -153,21 +155,111 @@ func (r *Registry) Validate(name string, args json.RawMessage) error {
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrNotFound, name)
 	}
+	if len(bytes.TrimSpace(args)) == 0 {
+		args = json.RawMessage("{}")
+	}
+	if err := validateStrictJSONObject(args); err != nil {
+		return err
+	}
 	sch := r.schemas[name]
 	if sch == nil {
 		return nil
 	}
-	if len(bytes.TrimSpace(args)) == 0 {
-		args = json.RawMessage("{}")
-	}
 	val, err := jsonschema.UnmarshalJSON(bytes.NewReader(args))
 	if err != nil {
-		return fmt.Errorf("%w: invalid JSON: %v", ErrValidation, err)
+		return fmt.Errorf("%w: invalid JSON", ErrValidation)
 	}
 	if err := sch.Validate(val); err != nil {
 		return fmt.Errorf("%w: %v", ErrValidation, err)
 	}
 	return nil
+}
+
+// validateStrictJSONObject enforces a single JSON object root with no duplicate keys at any depth
+// and no trailing tokens, returning ErrValidation without echoing untrusted argument content.
+func validateStrictJSONObject(raw json.RawMessage) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("%w: invalid JSON", ErrValidation)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("%w: arguments must be a JSON object", ErrValidation)
+	}
+	if err := validateJSONObjectBody(dec); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("%w: trailing JSON tokens", ErrValidation)
+		}
+		return fmt.Errorf("%w: invalid JSON", ErrValidation)
+	}
+	return nil
+}
+
+func validateJSONObjectBody(dec *json.Decoder) error {
+	seen := make(map[string]struct{})
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("%w: invalid JSON", ErrValidation)
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return fmt.Errorf("%w: invalid JSON", ErrValidation)
+		}
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("%w: duplicate JSON key", ErrValidation)
+		}
+		seen[key] = struct{}{}
+		if err := validateJSONValue(dec); err != nil {
+			return err
+		}
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("%w: invalid JSON", ErrValidation)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '}' {
+		return fmt.Errorf("%w: invalid JSON", ErrValidation)
+	}
+	return nil
+}
+
+func validateJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("%w: invalid JSON", ErrValidation)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		return validateJSONObjectBody(dec)
+	case '[':
+		for dec.More() {
+			if err := validateJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("%w: invalid JSON", ErrValidation)
+		}
+		if endDelim, ok := end.(json.Delim); !ok || endDelim != ']' {
+			return fmt.Errorf("%w: invalid JSON", ErrValidation)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: invalid JSON", ErrValidation)
+	}
 }
 
 // AgentView wraps a Registry to enforce that critical tools cannot be executed by the agent.
