@@ -11,8 +11,9 @@ the links for detail.
 | Product intent, scope, roadmap | `docs/vision.md` |
 | Stack, constitution, conventions | `openspec/config.yaml` (the `context:` block) |
 | How the system behaves today | `openspec/specs/<capability>/spec.md` |
-| Work in flight | `openspec/changes/<change>/` (proposal, design, tasks, delta specs) |
+| Work in flight | `openspec/changes/<change>/` (proposal, design, delta specs) |
 | History of past changes | `openspec/changes/archive/` |
+| Tasks and issue tracking | Beads (`bd ready`, `bd list`; see "Beads Issue Tracker" below) |
 
 The constitution in `openspec/config.yaml` overrides anything in this file, in a task, or in a
 prompt. If an instruction conflicts with it, stop and say so.
@@ -40,12 +41,16 @@ Use the OpenSpec commands for your tool (`/opsx:explore`, `/opsx:propose`, `/ops
 
 1. **Explore** (optional). Read code and specs, ask questions. Write no code.
 2. **Propose.** Create `openspec/changes/<verb>-<thing>/` with `proposal.md`, delta specs,
-   `tasks.md`, and `design.md` when the change adds a dependency, a migration, a security
-   boundary, or touches more than one package. Then **stop**. Proposing never authorises
-   implementing.
-3. **Human review.** The owner reviews the delta specs and tasks. Do not start applying until
-   they say so in the conversation.
-4. **Apply.** Work through `tasks.md` in order (rules below).
+   and `design.md` when the change adds a dependency, a migration, a security boundary, or
+   touches more than one package. Track the change's implementation tasks in Beads (`bd create`,
+   grouped under a parent epic or labelled with `<change-name>` and ordered with `--deps`)
+   rather than creating a `tasks.md` file. Each task names the test that proves it and the
+   files in scope, ordered so the system runs end to end as early as possible. Then **stop**.
+   Proposing never authorises implementing.
+3. **Human review.** The owner reviews the delta specs and Beads tasks. Do not start applying
+   until they say so in the conversation.
+4. **Apply.** Work through the change's Beads tasks in dependency order via `bd ready` (rules
+   below).
 5. **Verify.** Map every scenario to a passing test (see "Definition of done").
 6. **Archive.** Only when the owner asks. Always sync the deltas into `openspec/specs/`;
    never "archive without syncing" for a behaviour change.
@@ -65,7 +70,7 @@ One change per branch, named `change/<change-name>`. Do not mix two changes in o
 - Specify model-driven behaviour at the boundary (what Nestor does with a model response),
   never as the model's exact wording.
 - Follow the per-artifact `rules:` in `openspec/config.yaml` (Non-goals section, constitution
-  principles touched, failure modes, a named test per task).
+  principles touched, failure modes, and a named test per Beads task).
 - Run `openspec validate <change> --strict` before handing a proposal back.
 
 ## Applying a change
@@ -74,14 +79,16 @@ One change per branch, named `change/<change-name>`. Do not mix two changes in o
 - **Never edit the change's delta specs during apply.** If a scenario looks wrong, impossible
   or ambiguous, stop and explain which one and why. The owner decides; then the delta is
   updated in its own step before you continue.
-- Do tasks in the order listed. For each task:
-  1. Write or update the test named in the task, run it, and see it fail.
-  2. Implement until that test and the whole suite pass.
-  3. Tick the task (`- [x]`) only after `go test ./...` is green.
-  4. Commit (one commit per task is ideal).
+- Work through ready Beads tasks (`bd ready`) in dependency order. For each task:
+  1. Claim it (`bd update <id> --claim`) and inspect its details (`bd show <id>`).
+  2. Write or update the test named in the task, run it, and see it fail.
+  3. Implement until that test and the whole suite pass.
+  4. Close the task (`bd close <id>`) only after `go test ./...` is green.
+  5. Commit (one commit per task is ideal).
 - Fix code, not tests derived from scenarios. Changing such a test requires the owner's OK.
-- Stay inside the scope of `tasks.md`. If you must touch a file outside it, say why in the
-  commit message. If the scope turns out wrong, stop and propose an update to the change.
+- Stay inside the scope of the change's Beads tasks. If you must touch a file outside it, say
+  why in the commit message (and file a follow-up bead with `bd create` if new work is
+  discovered). If the scope turns out wrong, stop and propose an update to the change.
 
 ## Stop and ask when
 
@@ -129,7 +136,7 @@ These restate the constitution as code-level checks. Reviews reject any diff tha
 
 ```sh
 gofmt -l . && go vet ./...                  # must be clean
-go test ./...                               # unit tests, must be green before ticking a task
+go test ./...                               # unit tests, must be green before closing a task
 go test -tags integration ./...             # needs Docker, or TEST_DATABASE_URL set to a Postgres server
 go test -tags eval ./evals/...              # real models via LiteLLM; costs money; only when asked
 openspec validate --all --strict            # before every commit that touches openspec/
@@ -139,20 +146,20 @@ docker compose --env-file deploy/.env.example -f deploy/docker-compose.yml confi
 
 ## Definition of done for a change
 
-- Every task in `tasks.md` is ticked and `go test ./...` and the integration suite pass.
+- Every Beads task for the change is closed (`bd list`) and `go test ./...` and the integration suite pass.
 - `gofmt`, `go vet` and `openspec validate --all --strict` are clean.
 - Every scenario in the delta specs maps to a named, passing test. The PR description contains
   a table: scenario → test file and name → pass/fail. Any scenario without a test is marked
   UNTESTED and blocks merge.
 - If the change touches approval, tools, MCP or skills, the relevant eval suite has been run
   against `cheap` and `strong` (when the owner asks) with zero unapproved critical executions.
-- Files changed outside the paths named in `tasks.md` are listed with a one-line reason.
+- Files changed outside the paths named in the change's Beads tasks are listed with a one-line reason.
 - After merge, the owner asks for archive; the living spec in `openspec/specs/` is updated.
 
 ## Commits
 
 - Imperative subject, max 72 characters, prefixed with the change name:
-  `add-chat-foundation: implement allowlist sync (task 3.2)`.
+  `add-chat-foundation: implement allowlist sync (<bead-id>)`.
 - Bug fixes without a change cite the requirement: `fix: restore history limit (agent-loop / Conversation context)`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:1105d646 -->
