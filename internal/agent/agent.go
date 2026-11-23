@@ -40,6 +40,12 @@ type Approvals interface {
 	Propose(ctx context.Context, user identity.UserID, tool tools.Tool, args json.RawMessage) (store.PendingAction, error)
 }
 
+// SkillCatalog lists the skills enabled for a user. skills.Catalog implements it.
+type SkillCatalog interface {
+	// PromptBlock returns the names and descriptions of user's skills, or "" when there are none.
+	PromptBlock(user identity.UserID) string
+}
+
 // CardSender shows a pending action to its user. An error leaves the action pending: its card is
 // sent again later.
 type CardSender interface {
@@ -60,6 +66,9 @@ type Options struct {
 	// Notices delivers outcome-unknown notices that were not delivered when first due. Without it,
 	// they are not sent again.
 	Notices approval.Notifier
+	// Skills adds the names and descriptions of the user's enabled skills to the system prompt.
+	// Without it, no skills are listed.
+	Skills SkillCatalog
 	// Location adds the current local date, time and IANA zone name to the system prompt on each
 	// turn when set. Without it, SystemPrompt is sent unchanged.
 	Location *time.Location
@@ -117,7 +126,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 		return "", fmt.Errorf("load proposed actions: %w", err)
 	}
 
-	messages := a.prompt(history, conversation.StartedAt, proposed)
+	messages := a.prompt(user, history, conversation.StartedAt, proposed)
 	var modelTools []model.Tool
 	if a.opts.Tools != nil {
 		modelTools = a.opts.Tools.ToolsFor(ctx, user)
@@ -382,19 +391,26 @@ func (a *Agent) now() time.Time {
 	return time.Now()
 }
 
-func (a *Agent) systemPrompt() string {
-	if a.opts.Location == nil {
-		return a.opts.SystemPrompt
+// systemPrompt is the configured prompt, then the local time when a location is set, then the
+// skills enabled for user, each part on its own lines.
+func (a *Agent) systemPrompt(user identity.UserID) string {
+	var parts []string
+	if a.opts.SystemPrompt != "" {
+		parts = append(parts, a.opts.SystemPrompt)
 	}
-	local := a.now().In(a.opts.Location)
-	line := fmt.Sprintf("Current time: %s (%s).", local.Format("Monday, 2006-01-02 15:04 MST"), a.opts.Location.String())
-	if a.opts.SystemPrompt == "" {
-		return line
+	if a.opts.Location != nil {
+		local := a.now().In(a.opts.Location)
+		parts = append(parts, fmt.Sprintf("Current time: %s (%s).", local.Format("Monday, 2006-01-02 15:04 MST"), a.opts.Location.String()))
 	}
-	return a.opts.SystemPrompt + "\n" + line
+	if a.opts.Skills != nil {
+		if block := strings.TrimSuffix(a.opts.Skills.PromptBlock(user), "\n"); block != "" {
+			parts = append(parts, block)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
-func (a *Agent) prompt(history []store.Message, convStarted time.Time, proposed []store.PendingAction) []model.Message {
+func (a *Agent) prompt(user identity.UserID, history []store.Message, convStarted time.Time, proposed []store.PendingAction) []model.Message {
 	var active []store.PendingAction
 	convFloor := convStarted.Truncate(time.Microsecond)
 	for _, p := range proposed {
@@ -428,7 +444,7 @@ func (a *Agent) prompt(history []store.Message, convStarted time.Time, proposed 
 	}
 
 	messages := make([]model.Message, 0, len(history)+1+2*len(active))
-	messages = append(messages, model.Message{Role: model.RoleSystem, Content: a.systemPrompt()})
+	messages = append(messages, model.Message{Role: model.RoleSystem, Content: a.systemPrompt(user)})
 	for i, m := range history {
 		messages = append(messages, model.Message{Role: m.Role, Content: m.Content})
 		if group := byIndex[i]; len(group) > 0 {

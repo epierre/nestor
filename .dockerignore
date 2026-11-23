@@ -4,3 +4,4 @@
 !go.sum
 !cmd
 !internal
+!deploy/skill-runner/entrypoint.sh

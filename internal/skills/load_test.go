@@ -187,3 +187,72 @@ func TestLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestSizeLimits(t *testing.T) {
+	skillAt := func(size int) string {
+		head := "---\nname: weekly-review\ndescription: Run my weekly review.\n---\n"
+		return head + strings.Repeat("x", size-len(head))
+	}
+	tests := []struct {
+		name     string
+		files    [][2]string
+		wantLoad bool
+		wantLog  string
+	}{
+		{"oversized reference file skipped",
+			[][2]string{{"SKILL.md", weeklySkill}, {"history.md", strings.Repeat("x", 40*1024)}}, false, "history.md"},
+		{"oversized nested file skipped",
+			[][2]string{{"SKILL.md", weeklySkill}, {"data/big.csv", strings.Repeat("x", MaxFileBytes+1)}}, false, "data/big.csv"},
+		{"oversized SKILL.md skipped",
+			[][2]string{{"SKILL.md", skillAt(20 * 1024)}}, false, "SKILL.md"},
+		{"file at limit loaded",
+			[][2]string{{"SKILL.md", skillAt(MaxSkillFileBytes)}, {"history.md", strings.Repeat("x", MaxFileBytes)}}, true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFiles(t, filepath.Join(root, "weekly-review"), tt.files)
+			writeFiles(t, filepath.Join(root, "newsletter-triage"), [][2]string{{"SKILL.md", triageSkill}})
+
+			// Pin with the limits ignored, so the skill is listed as an owner would have it.
+			pins := map[string]string{}
+			for _, name := range []string{"weekly-review", "newsletter-triage"} {
+				f, err := hashFolder(os.DirFS(filepath.Join(root, name)), false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pins[name] = f.sum
+			}
+			cfg := Config{Skills: []Entry{
+				{Name: "weekly-review", Hash: pins["weekly-review"], Users: []string{"*"}},
+				{Name: "newsletter-triage", Hash: pins["newsletter-triage"], Users: []string{"*"}},
+			}}
+			var logs bytes.Buffer
+			got := Load(root, cfg, slog.New(slog.NewTextHandler(&logs, nil)))
+
+			var names []string
+			for _, l := range got {
+				names = append(names, l.Skill.Name)
+			}
+			want := "newsletter-triage"
+			if tt.wantLoad {
+				want = "weekly-review,newsletter-triage"
+			}
+			if strings.Join(names, ",") != want {
+				t.Fatalf("loaded %v, want %s; logs:\n%s", names, want, logs.String())
+			}
+			if !tt.wantLoad && (!strings.Contains(logs.String(), "level=ERROR") ||
+				!strings.Contains(logs.String(), "weekly-review") || !strings.Contains(logs.String(), tt.wantLog)) {
+				t.Fatalf("no error naming weekly-review and %s:\n%s", tt.wantLog, logs.String())
+			}
+
+			_, pinErr := Pin(root, "weekly-review")
+			if tt.wantLoad != (pinErr == nil) {
+				t.Fatalf("Pin() error = %v, want load %v", pinErr, tt.wantLoad)
+			}
+			if pinErr != nil && !strings.Contains(pinErr.Error(), tt.wantLog) {
+				t.Fatalf("Pin() error = %v, want it to name %s", pinErr, tt.wantLog)
+			}
+		})
+	}
+}

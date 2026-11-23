@@ -210,6 +210,23 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+func TestDecodeConfig(t *testing.T) {
+	hash := "sha256:" + strings.Repeat("0", 64)
+	c, err := DecodeConfig(strings.NewReader("skills:\n  - {name: a, hash: \"" + hash + "\", users: [7, \"*\"]}\n"))
+	if err != nil || len(c.Skills) != 1 || c.Skills[0].Users[0] != "7" {
+		t.Fatalf("DecodeConfig() = %+v, %v; want user 7 accepted without a user list", c, err)
+	}
+	for _, bad := range []string{
+		"skills:\n  - {name: a, hash: \"" + hash + "\", users: [bob]}\n",
+		"skills:\n  - {name: a, hash: \"md5:x\"}\n",
+		"skills:\n  - {name: a, hash: \"" + hash + "\", image: alpine}\n",
+	} {
+		if _, err := DecodeConfig(strings.NewReader(bad)); err == nil {
+			t.Errorf("DecodeConfig(%q) succeeded", bad)
+		}
+	}
+}
+
 func TestEnabledFor(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -95,6 +95,7 @@ Changes 9 and 10 depend only on change 2 and can be pulled earlier.
 ```
 cmd/nestor/          Entrypoint
 cmd/mcp-timezone/    Reference MCP server: read-only time zone tools
+cmd/sandboxd/        Sidecar that runs skill scripts in throwaway containers with no network
 config/mcp.yaml      MCP servers Nestor may use, with the risk of each allowlisted tool
 config/skills.yaml   Reviewed skills, their pinned hashes and the users who get them
 skills/              Skill folders (SKILL.md plus reference files), one per skill
@@ -116,9 +117,12 @@ Anthropic API key only if you enable an Anthropic model in [`deploy/litellm.yaml
 ```sh
 cp deploy/.env.example deploy/.env   # then replace every value
 docker compose -f deploy/docker-compose.yml up -d --build
+docker compose -f deploy/docker-compose.yml --profile build build skill-runner   # image for skill scripts
 ```
 
-Nestor applies database migrations and syncs the allowlist each time it starts.
+Nestor applies database migrations and syncs the allowlist each time it starts. The
+`skill-runner` image is never started by Compose: `sandboxd`, the only service given the Docker
+socket, starts one throwaway container from it per skill script run, with no network.
 
 ### Environment variables
 
@@ -143,6 +147,7 @@ Set these in `deploy/.env`, which git ignores (validated by [`internal/config/co
 | `MCP_CONFIG` | No | Path of the reviewed `mcp.yaml`. Set by `docker-compose.yml`, which mounts [`config/mcp.yaml`](config/mcp.yaml). Unset: no MCP servers |
 | `SKILLS_CONFIG` | No | Path of the reviewed `skills.yaml`. Set by `docker-compose.yml`, which mounts [`config/skills.yaml`](config/skills.yaml). Unset: no skills |
 | `SKILLS_DIR` | With `SKILLS_CONFIG` | Folder with one subfolder per skill. Set by `docker-compose.yml`, which mounts [`skills/`](skills/) read-only |
+| `SANDBOXD_URL` | No | Where Nestor asks `sandboxd` to run skill scripts; must be an `http` URL to an internal host. Set by `docker-compose.yml` to `http://sandboxd:8080`. Unset: skill scripts are unavailable |
 | `ADMIN_USER_ID` | No | Internal user ID (not a Telegram ID) who receives operational alerts, such as an MCP tool waiting for `nestor mcp approve`. Unset: alerts are only logged |
 
 ### Using the bot

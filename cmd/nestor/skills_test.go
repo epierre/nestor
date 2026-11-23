@@ -20,6 +20,25 @@ func TestSkillsCommand(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(skill), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	big := filepath.Join(root, "big-skill")
+	if err := os.MkdirAll(big, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bigSkill := "---\nname: big-skill\ndescription: Too big.\n---\nRead history.md.\n"
+	if err := os.WriteFile(filepath.Join(big, "SKILL.md"), []byte(bigSkill), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(big, "history.md"), bytes.Repeat([]byte("x"), 40*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bigMD := filepath.Join(root, "big-instructions")
+	if err := os.MkdirAll(bigMD, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bigMDSkill := "---\nname: big-instructions\ndescription: Too long.\n---\n" + strings.Repeat("x", 20*1024)
+	if err := os.WriteFile(filepath.Join(bigMD, "SKILL.md"), []byte(bigMDSkill), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	want, err := skills.HashDir(os.DirFS(dir))
 	if err != nil {
 		t.Fatal(err)
@@ -36,6 +55,8 @@ func TestSkillsCommand(t *testing.T) {
 		{"invalid name", []string{"pin", "../etc"}, "", "invalid skill name"},
 		{"missing name", []string{"pin"}, "", "usage"},
 		{"unknown subcommand", []string{"enable", "weekly-review"}, "", "usage"},
+		{"pin refuses oversized file", []string{"pin", "big-skill"}, "", "history.md"},
+		{"pin refuses oversized SKILL.md", []string{"pin", "big-instructions"}, "", "SKILL.md"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
