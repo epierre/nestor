@@ -92,6 +92,11 @@ func run() error {
 		return fmt.Errorf("load skills: %w", err)
 	}
 	slog.Info("skills loaded", "count", len(loadedSkills))
+	catalog := skills.NewCatalog(loadedSkills)
+	// Registered even without skills, so a call to load_skill gets "unknown skill".
+	if err := skills.RegisterTools(registry, catalog); err != nil {
+		return fmt.Errorf("register skill tools: %w", err)
+	}
 	// MCP supervisors get their own context, so that whatever ends run, they are stopped before
 	// it returns rather than waited on while still running.
 	mcpCtx, stopMCP := context.WithCancel(ctx)
@@ -110,7 +115,7 @@ func run() error {
 	bot.SetDecider(gate)
 	go reminders.Run(ctx, st, bot, reminderTick)
 	opts := agentOptions(cfg, registry, loc)
-	opts.Skills = skills.NewCatalog(loadedSkills)
+	opts.Skills = catalog
 	opts.Approvals = gate
 	opts.Cards = bot
 	opts.Notices = bot
