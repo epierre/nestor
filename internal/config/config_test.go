@@ -396,3 +396,40 @@ func TestMCPConfigPath(t *testing.T) {
 		t.Errorf("MCPConfigPath = %q", cfg.MCPConfigPath)
 	}
 }
+
+func TestSkillsPaths(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     string
+		dir        string
+		wantErr    string
+		wantConfig string
+		wantDir    string
+	}{
+		{name: "skills paths read", config: "/etc/nestor/skills.yaml", dir: "/etc/nestor/skills",
+			wantConfig: "/etc/nestor/skills.yaml", wantDir: "/etc/nestor/skills"},
+		{name: "skills unset", wantConfig: "", wantDir: ""},
+		{name: "skills config without dir rejected", config: "/etc/nestor/skills.yaml",
+			wantErr: "SKILLS_DIR is required when SKILLS_CONFIG is set"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			env["SKILLS_CONFIG"] = tt.config
+			env["SKILLS_DIR"] = tt.dir
+			cfg, err := load(env)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load() error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.SkillsConfigPath != tt.wantConfig || cfg.SkillsDir != tt.wantDir {
+				t.Errorf("SkillsConfigPath, SkillsDir = %q, %q", cfg.SkillsConfigPath, cfg.SkillsDir)
+			}
+		})
+	}
+}

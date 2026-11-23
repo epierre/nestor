@@ -46,6 +46,10 @@ type Config struct {
 	ApprovalTTL time.Duration
 	// MCPConfigPath is the reviewed mcp.yaml listing MCP servers. Empty: no MCP servers.
 	MCPConfigPath string
+	// SkillsConfigPath is the reviewed skills.yaml listing enabled skills. Empty: no skills.
+	SkillsConfigPath string
+	// SkillsDir holds one folder per skill. Required when SkillsConfigPath is set.
+	SkillsDir string
 	// AdminUserID is the internal user who receives operational alerts, such as an MCP tool
 	// waiting for approval. Zero when unset; alerts are then only logged.
 	AdminUserID identity.UserID
@@ -140,6 +144,11 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	cfg.MCPConfigPath = get("MCP_CONFIG")
+	cfg.SkillsConfigPath = get("SKILLS_CONFIG")
+	cfg.SkillsDir = get("SKILLS_DIR")
+	if cfg.SkillsConfigPath != "" && cfg.SkillsDir == "" {
+		errs = append(errs, errors.New("SKILLS_DIR is required when SKILLS_CONFIG is set"))
+	}
 
 	if raw := get("ADMIN_USER_ID"); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)

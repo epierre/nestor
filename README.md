@@ -96,6 +96,8 @@ Changes 9 and 10 depend only on change 2 and can be pulled earlier.
 cmd/nestor/          Entrypoint
 cmd/mcp-timezone/    Reference MCP server: read-only time zone tools
 config/mcp.yaml      MCP servers Nestor may use, with the risk of each allowlisted tool
+config/skills.yaml   Reviewed skills, their pinned hashes and the users who get them
+skills/              Skill folders (SKILL.md plus reference files), one per skill
 internal/            Application packages
 evals/               On-demand real-model evaluation suites (-tags eval)
 deploy/              Docker Compose stack and LiteLLM configuration
@@ -139,6 +141,8 @@ Set these in `deploy/.env`, which git ignores (validated by [`internal/config/co
 | `TIMEZONE` | No | IANA timezone for local clock context, tasks and reminders. Default `Europe/Zurich` |
 | `CREDENTIALS_KEY` | No | Base64 of 32 random bytes (`openssl rand -base64 32`) that encrypts per-user MCP credentials. Needed to store one with `nestor credentials set` |
 | `MCP_CONFIG` | No | Path of the reviewed `mcp.yaml`. Set by `docker-compose.yml`, which mounts [`config/mcp.yaml`](config/mcp.yaml). Unset: no MCP servers |
+| `SKILLS_CONFIG` | No | Path of the reviewed `skills.yaml`. Set by `docker-compose.yml`, which mounts [`config/skills.yaml`](config/skills.yaml). Unset: no skills |
+| `SKILLS_DIR` | With `SKILLS_CONFIG` | Folder with one subfolder per skill. Set by `docker-compose.yml`, which mounts [`skills/`](skills/) read-only |
 | `ADMIN_USER_ID` | No | Internal user ID (not a Telegram ID) who receives operational alerts, such as an MCP tool waiting for `nestor mcp approve`. Unset: alerts are only logged |
 
 ### Using the bot

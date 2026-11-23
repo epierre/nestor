@@ -1,0 +1,6 @@
+# Skills Nestor may use. Reviewed in git; Nestor reads it from SKILLS_CONFIG at startup, and an
+# invalid file stops it. Add a skill only after reviewing every file in skills/<name>, then pin it:
+#   nestor skills pin <name>
+# and paste the printed entry below, adding users (internal IDs or "*"). A skill whose files no
+# longer match its hash is skipped and logged.
+skills: []
