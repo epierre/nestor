@@ -2,6 +2,7 @@
 package approval
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,8 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf16"
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
@@ -20,9 +24,15 @@ import (
 	"github.com/epierre/nestor/internal/tools"
 )
 
+// MaxPreviewUTF16 bounds the final escaped preview stored on a pending action so that approval
+// cards and all follow-up outcome notices fit within Telegram's 4096 UTF-16 code unit limit.
+const MaxPreviewUTF16 = 3900
+
 var (
 	// ErrNotCritical is returned when Propose is given a tool that does not need approval.
 	ErrNotCritical = errors.New("tool is not critical")
+	// ErrPreviewTooLong is returned when a critical tool's escaped preview exceeds MaxPreviewUTF16.
+	ErrPreviewTooLong = errors.New("approval preview exceeds maximum length")
 	// ErrNoPendingAction is returned by Decide when the action is unknown, belongs to another
 	// user, or is no longer pending. The three are not told apart.
 	ErrNoPendingAction = errors.New("this action is no longer pending")
@@ -35,6 +45,21 @@ var (
 	// Such an action may or may not have run, so it is failed and never retried.
 	ErrOutcomeUnknown = errors.New(store.OutcomeUnknownError)
 )
+
+// PreviewTooLongError reports a preview length cap rejection with its measured and maximum UTF-16
+// code unit counts, without echoing any preview or argument text.
+type PreviewTooLongError struct {
+	Measured int
+	Max      int
+}
+
+func (e *PreviewTooLongError) Error() string {
+	return fmt.Sprintf("approval preview is %d UTF-16 units (max %d)", e.Measured, e.Max)
+}
+
+func (e *PreviewTooLongError) Unwrap() error {
+	return ErrPreviewTooLong
+}
 
 // Notifier sends a message to a chat. The Telegram channel implements it.
 type Notifier interface {
@@ -94,9 +119,19 @@ func (g *Gate) Propose(ctx context.Context, user identity.UserID, tool tools.Too
 	if tool.Risk() != tools.RiskCritical {
 		return store.PendingAction{}, ErrNotCritical
 	}
-	preview, err := previewFor(ctx, tool, args)
+	if len(bytes.TrimSpace(args)) == 0 {
+		args = json.RawMessage("{}")
+	}
+	rawPreview, err := previewFor(ctx, tool, args)
 	if err != nil {
 		return store.PendingAction{}, fmt.Errorf("preview %s: %w", tool.Name(), err)
+	}
+	preview := escapePreview(rawPreview)
+	if n := utf16Len(preview); n > MaxPreviewUTF16 {
+		slog.WarnContext(ctx, "approval proposal rejected",
+			"tool", tool.Name(), "reason", "preview_too_long",
+			"preview_utf16_len", n, "preview_utf16_limit", MaxPreviewUTF16)
+		return store.PendingAction{}, &PreviewTooLongError{Measured: n, Max: MaxPreviewUTF16}
 	}
 	id, err := newID()
 	if err != nil {
@@ -125,6 +160,46 @@ func (g *Gate) Propose(ctx context.Context, user identity.UserID, tool tools.Too
 	}
 	action.UserID = user
 	return action, nil
+}
+
+// escapePreview visibly escapes control, line/paragraph separator, and invisible format characters
+// (keeping intentional '\n' and U+200D ZWJ for joined emoji) to prevent visual spoofing on cards.
+func escapePreview(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if !isDisallowedPreviewRune(r) {
+			b.WriteRune(r)
+			continue
+		}
+		if r <= 0xFFFF {
+			fmt.Fprintf(&b, "\\u%04x", r)
+			continue
+		}
+		r1, r2 := utf16.EncodeRune(r)
+		fmt.Fprintf(&b, "\\u%04x\\u%04x", r1, r2)
+	}
+	return b.String()
+}
+
+func isDisallowedPreviewRune(r rune) bool {
+	if unicode.Is(unicode.Cc, r) {
+		return r != '\n'
+	}
+	if unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+		return true
+	}
+	if unicode.Is(unicode.Cf, r) {
+		return r != '\u200D'
+	}
+	return false
+}
+
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		n += utf16.RuneLen(r)
+	}
+	return n
 }
 
 type turnKey struct{}

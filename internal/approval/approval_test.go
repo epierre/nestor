@@ -900,3 +900,197 @@ func TestSweepAndNoticeStructuredLogs(t *testing.T) {
 		t.Errorf("sawNotice=%v lines=%d, want outcome notice sent log; raw logs:\n%s", sawNotice, lines, raw)
 	}
 }
+
+type fixedPreviewTool struct {
+	name    string
+	preview string
+}
+
+func (f fixedPreviewTool) Name() string            { return f.name }
+func (f fixedPreviewTool) Description() string     { return "critical test tool" }
+func (f fixedPreviewTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (f fixedPreviewTool) Risk() tools.Risk        { return tools.RiskCritical }
+func (f fixedPreviewTool) Preview(json.RawMessage) (string, error) {
+	return f.preview, nil
+}
+func (f fixedPreviewTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
+	return tools.Result{Content: "ok"}, nil
+}
+
+func TestProposeEscapesBidiAndControlChars(t *testing.T) {
+	h := newHarness(t)
+	ctx := identity.WithUser(context.Background(), testUser)
+	// U+202E (RLO), \r, \t, NUL, U+2028, U+2029, U+200B (ZWSP), U+E0041 (tag char non-BMP),
+	// intentional \n, and family emoji containing U+200D (ZWJ).
+	rawPreview := "line1\n" +
+		"\u202e" + "spoof" +
+		"\r\t\x00" +
+		"\u2028\u2029\u200b" +
+		string(rune(0xE0041)) +
+		"\n👨‍👩‍👧‍👦"
+
+	tool := fixedPreviewTool{name: "custom_crit", preview: rawPreview}
+	action, err := h.gate.Propose(ctx, testUser, tool, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+
+	want := "line1\n" +
+		`\u202espoof` +
+		`\u000d\u0009\u0000` +
+		`\u2028\u2029\u200b` +
+		`\udb40\udc41` +
+		"\n👨‍👩‍👧‍👦"
+	if action.Preview != want {
+		t.Errorf("action.Preview = %q, want %q", action.Preview, want)
+	}
+	if stored := h.stored(t, testUser, action.ID); stored.Preview != want {
+		t.Errorf("stored.Preview = %q, want %q", stored.Preview, want)
+	}
+}
+
+func TestProposePreviewLengthCap(t *testing.T) {
+	if MaxPreviewUTF16 != 3900 {
+		t.Fatalf("MaxPreviewUTF16 = %d, want 3900", MaxPreviewUTF16)
+	}
+
+	t.Run("exact 3900 ASCII UTF-16 units passes", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := identity.WithUser(context.Background(), testUser)
+		tool := fixedPreviewTool{name: "crit", preview: strings.Repeat("a", MaxPreviewUTF16)}
+		if _, err := h.gate.Propose(ctx, testUser, tool, json.RawMessage(`{}`)); err != nil {
+			t.Fatalf("Propose at 3900 ASCII units failed: %v", err)
+		}
+		if got := len(h.st.PendingActions(testUser)); got != 1 {
+			t.Errorf("stored %d actions, want 1", got)
+		}
+	})
+
+	t.Run("exact 3900 surrogate-pair emoji UTF-16 units passes", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := identity.WithUser(context.Background(), testUser)
+		emoji := "\U0001F600" // 2 UTF-16 units
+		tool := fixedPreviewTool{name: "crit", preview: strings.Repeat(emoji, MaxPreviewUTF16/2)}
+		if _, err := h.gate.Propose(ctx, testUser, tool, json.RawMessage(`{}`)); err != nil {
+			t.Fatalf("Propose at 3900 emoji UTF-16 units failed: %v", err)
+		}
+		if got := len(h.st.PendingActions(testUser)); got != 1 {
+			t.Errorf("stored %d actions, want 1", got)
+		}
+	})
+
+	t.Run("3901 units rejected without storing or superseding prior action", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := identity.WithUser(context.Background(), testUser)
+		priorTool := fixedPreviewTool{name: "crit", preview: "short valid preview"}
+		prior, err := h.gate.Propose(ctx, testUser, priorTool, json.RawMessage(`{"step":1}`))
+		if err != nil {
+			t.Fatalf("prior Propose: %v", err)
+		}
+
+		oversizedTool := fixedPreviewTool{name: "crit", preview: strings.Repeat("a", MaxPreviewUTF16+1)}
+		_, err = h.gate.Propose(ctx, testUser, oversizedTool, json.RawMessage(`{"step":2}`))
+		if !errors.Is(err, ErrPreviewTooLong) {
+			t.Fatalf("err = %v, want ErrPreviewTooLong", err)
+		}
+		var tooLong *PreviewTooLongError
+		if !errors.As(err, &tooLong) {
+			t.Fatalf("err type = %T, want *PreviewTooLongError", err)
+		}
+		if tooLong.Measured != MaxPreviewUTF16+1 || tooLong.Max != MaxPreviewUTF16 {
+			t.Errorf("tooLong = %+v, want Measured=%d Max=%d", tooLong, MaxPreviewUTF16+1, MaxPreviewUTF16)
+		}
+
+		actions := h.st.PendingActions(testUser)
+		if len(actions) != 1 {
+			t.Fatalf("stored %d actions, want 1 (oversized must not be stored)", len(actions))
+		}
+		if actions[0].ID != prior.ID || actions[0].State != store.PendingProposed {
+			t.Errorf("prior action = %+v, want unchanged proposed action %s", actions[0], prior.ID)
+		}
+	})
+
+	t.Run("escape expansion counted before length cap", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := identity.WithUser(context.Background(), testUser)
+		// Raw length is 3896 UTF-16 units, but \u202e expands from 1 unit to 6 ("\u202e") -> 3901 units.
+		tool := fixedPreviewTool{name: "crit", preview: strings.Repeat("a", 3895) + "\u202e"}
+		_, err := h.gate.Propose(ctx, testUser, tool, json.RawMessage(`{}`))
+		if !errors.Is(err, ErrPreviewTooLong) {
+			t.Fatalf("err = %v, want ErrPreviewTooLong", err)
+		}
+		var tooLong *PreviewTooLongError
+		if !errors.As(err, &tooLong) || tooLong.Measured != 3901 || tooLong.Max != 3900 {
+			t.Errorf("tooLong = %+v, want Measured=3901 Max=3900", tooLong)
+		}
+		if got := len(h.st.PendingActions(testUser)); got != 0 {
+			t.Errorf("stored %d actions, want 0", got)
+		}
+	})
+
+	t.Run("empty and whitespace args normalized to empty object", func(t *testing.T) {
+		for _, rawArgs := range []json.RawMessage{nil, json.RawMessage(``), json.RawMessage("  \t\n ")} {
+			h := newHarness(t)
+			ctx := identity.WithUser(context.Background(), testUser)
+			tool := fixedPreviewTool{name: "crit", preview: "ok"}
+			action, err := h.gate.Propose(ctx, testUser, tool, rawArgs)
+			if err != nil {
+				t.Fatalf("Propose(%q): %v", rawArgs, err)
+			}
+			stored := h.stored(t, testUser, action.ID)
+			if string(stored.ArgsJSON) != "{}" {
+				t.Errorf("stored.ArgsJSON = %q, want {}", stored.ArgsJSON)
+			}
+			if wantHash := ArgsHash(testUser, "crit", json.RawMessage("{}")); stored.ArgsHash != wantHash {
+				t.Errorf("stored.ArgsHash = %q, want %q", stored.ArgsHash, wantHash)
+			}
+		}
+	})
+}
+
+func TestProposeRejectionStructuredLogs(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&logs, nil))))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h := newHarness(t)
+	ctx := obs.WithRequestID(identity.WithUser(context.Background(), testUser), "req-cap-1")
+	secretPreview := "SUPER-SECRET-PREVIEW-" + strings.Repeat("x", MaxPreviewUTF16)
+	tool := fixedPreviewTool{name: "crit_tool", preview: secretPreview}
+
+	_, err := h.gate.Propose(ctx, testUser, tool, json.RawMessage(`{"secret":"SUPER-SECRET-ARG"}`))
+	if !errors.Is(err, ErrPreviewTooLong) {
+		t.Fatalf("err = %v, want ErrPreviewTooLong", err)
+	}
+
+	raw := logs.String()
+	for _, secret := range []string{"SUPER-SECRET-PREVIEW", "SUPER-SECRET-ARG"} {
+		if strings.Contains(raw, secret) {
+			t.Errorf("logs leaked %q:\n%s", secret, raw)
+		}
+	}
+
+	var sawReject bool
+	for _, lineText := range strings.Split(strings.TrimSpace(raw), "\n") {
+		if lineText == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(lineText), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", lineText, err)
+		}
+		if entry["reason"] == "preview_too_long" {
+			sawReject = true
+			if entry["request_id"] != "req-cap-1" || entry["user_id"] != float64(testUser) ||
+				entry["tool"] != "crit_tool" ||
+				entry["preview_utf16_len"] != float64(len("SUPER-SECRET-PREVIEW-")+MaxPreviewUTF16) ||
+				entry["preview_utf16_limit"] != float64(MaxPreviewUTF16) {
+				t.Errorf("unexpected rejection log entry: %v", entry)
+			}
+		}
+	}
+	if !sawReject {
+		t.Errorf("missing preview_too_long structured log; raw:\n%s", raw)
+	}
+}
