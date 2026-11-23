@@ -868,3 +868,140 @@ func TestNotifyUserReachesTheirChat(t *testing.T) {
 		t.Errorf("a message was sent for an unknown user: %+v", api.sent)
 	}
 }
+
+func TestNotifySplitsOversizedMessages(t *testing.T) {
+	t.Run("splits oversized ASCII and surrogate-pair emoji messages in order", func(t *testing.T) {
+		tests := []struct {
+			name string
+			text string
+		}{
+			{"oversized ASCII", strings.Repeat("a", 9000)},
+			{"oversized emoji", strings.Repeat("\U0001F600", 2500)},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				api := newBotAPI(t)
+				c := newChannel(api, knownSender())
+
+				if err := c.Notify(context.Background(), chatID, tt.text); err != nil {
+					t.Fatalf("Notify: %v", err)
+				}
+				sent := api.sentTexts()
+				if len(sent) < 2 {
+					t.Fatalf("sent %d parts, want >= 2", len(sent))
+				}
+				for i, part := range sent {
+					if !utf8.ValidString(part) {
+						t.Errorf("part %d split a UTF-8 rune", i)
+					}
+					if n := utf16Length(part); n > maxMessageLength {
+						t.Errorf("part %d is %d UTF-16 units, want <= %d", i, n, maxMessageLength)
+					}
+				}
+				if strings.Join(sent, "") != tt.text {
+					t.Error("sent parts do not concatenate to original text")
+				}
+			})
+		}
+	})
+
+	t.Run("failure returns immediately without backoff or retry", func(t *testing.T) {
+		api := newBotAPI(t)
+		api.failSends = 2
+		api.sendCode = http.StatusInternalServerError
+		c := newChannel(api, knownSender())
+
+		err := c.Notify(context.Background(), chatID, strings.Repeat("a", 5000))
+		if err == nil {
+			t.Fatal("Notify succeeded against failing API")
+		}
+		if api.failSends != 1 {
+			t.Errorf("failing sends left %d, want 1 (Notify must not retry)", api.failSends)
+		}
+	})
+
+	t.Run("empty text sends nothing", func(t *testing.T) {
+		api := newBotAPI(t)
+		c := newChannel(api, knownSender())
+
+		if err := c.Notify(context.Background(), chatID, ""); err != nil {
+			t.Fatalf("Notify: %v", err)
+		}
+		if got := api.sentTexts(); len(got) != 0 {
+			t.Errorf("sent %q, want nothing", got)
+		}
+	})
+}
+
+func TestApprovalMaxPreviewFitsAllTemplates(t *testing.T) {
+	previews := []struct {
+		name    string
+		preview string
+	}{
+		{"ASCII 3900 UTF-16 units", strings.Repeat("a", approval.MaxPreviewUTF16)},
+		{"emoji 3900 UTF-16 units", strings.Repeat("\U0001F600", approval.MaxPreviewUTF16/2)},
+	}
+
+	for _, p := range previews {
+		t.Run(p.name, func(t *testing.T) {
+			if got := utf16Length(p.preview); got != approval.MaxPreviewUTF16 {
+				t.Fatalf("test preview UTF-16 length = %d, want %d", got, approval.MaxPreviewUTF16)
+			}
+
+			// 1. SendApprovalCard fits in a single message <= maxMessageLength.
+			api := newBotAPI(t)
+			c := newChannel(api, knownSender())
+			ctx := channel.WithChat(context.Background(), chatID)
+			action := store.PendingAction{ID: "act-cap", Preview: p.preview}
+			if err := c.SendApprovalCard(ctx, action); err != nil {
+				t.Fatalf("SendApprovalCard: %v", err)
+			}
+			sent := api.sentTexts()
+			if len(sent) != 1 {
+				t.Fatalf("SendApprovalCard sent %d messages, want 1", len(sent))
+			}
+			if n := utf16Length(sent[0]); n > maxMessageLength {
+				t.Errorf("approval card = %d UTF-16 units, want <= %d", n, maxMessageLength)
+			}
+
+			// 2. approval.OutcomeNoticeText fits in 1 split part <= maxMessageLength.
+			notice := approval.OutcomeNoticeText(p.preview)
+			if n := utf16Length(notice); n > maxMessageLength {
+				t.Errorf("OutcomeNoticeText = %d UTF-16 units, want <= %d", n, maxMessageLength)
+			}
+			if parts := split(notice); len(parts) != 1 {
+				t.Errorf("OutcomeNoticeText split into %d parts, want 1", len(parts))
+			}
+
+			// 3. All six outcomeMessage variants fit <= maxMessageLength.
+			outcomes := []struct {
+				name   string
+				action store.PendingAction
+				err    error
+				empty  bool
+			}{
+				{"ErrNoPendingAction", store.PendingAction{Preview: p.preview}, approval.ErrNoPendingAction, true},
+				{"ErrIntegrity", store.PendingAction{State: store.PendingFailed, Preview: p.preview}, approval.ErrIntegrity, false},
+				{"PendingExecuted", store.PendingAction{State: store.PendingExecuted, Preview: p.preview}, nil, false},
+				{"PendingRejected", store.PendingAction{State: store.PendingRejected, Preview: p.preview}, nil, false},
+				{"PendingExpired", store.PendingAction{State: store.PendingExpired, Preview: p.preview}, approval.ErrExpired, false},
+				{"PendingFailed", store.PendingAction{State: store.PendingFailed, Preview: p.preview}, errors.New("boom"), false},
+			}
+			for _, oc := range outcomes {
+				msg := outcomeMessage(oc.action, oc.err)
+				if oc.empty {
+					if msg != "" {
+						t.Errorf("%s: got %q, want empty", oc.name, msg)
+					}
+					continue
+				}
+				if n := utf16Length(msg); n > maxMessageLength {
+					t.Errorf("%s = %d UTF-16 units, want <= %d", oc.name, n, maxMessageLength)
+				}
+				if parts := split(msg); len(parts) != 1 {
+					t.Errorf("%s split into %d parts, want 1", oc.name, len(parts))
+				}
+			}
+		})
+	}
+}

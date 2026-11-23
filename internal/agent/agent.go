@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -238,6 +239,10 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 	})
 	for _, call := range resp.ToolCalls {
 		start := time.Now()
+		args := call.Arguments
+		if len(bytes.TrimSpace(args)) == 0 {
+			args = json.RawMessage("{}")
+		}
 		tool, err := a.opts.Tools.Lookup(call.Name)
 		if err == nil && !tools.Enabled(ctx, tool, user) {
 			// Offered to other users only. Treated as unknown so the model learns nothing more.
@@ -246,6 +251,7 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 		var (
 			content    string
 			status     string
+			reason     string
 			risk       tools.Risk
 			resultJSON json.RawMessage
 			errText    string
@@ -253,31 +259,58 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 		)
 		if err != nil {
 			status = store.ToolCallStatusRejected
+			reason = "unknown_tool"
 			errText = err.Error()
 			content = tools.MarkData(fmt.Sprintf("error: unknown tool %q", call.Name))
 		} else {
 			risk = tool.Risk()
-			if valErr := a.opts.Tools.Validate(call.Name, call.Arguments); valErr != nil {
+			if valErr := a.opts.Tools.Validate(call.Name, args); valErr != nil {
 				status = store.ToolCallStatusRejected
+				reason = "invalid_arguments"
 				errText = valErr.Error()
 				content = tools.MarkData(fmt.Sprintf("error: invalid arguments: %v", valErr))
 			} else if tool.Risk() == tools.RiskCritical && a.opts.Approvals == nil {
 				status = store.ToolCallStatusRejected
+				reason = "no_approval_gate"
 				errText = "critical tool requires approval gate"
 				content = tools.MarkData(fmt.Sprintf("error: critical tool %q requires approval gate", call.Name))
 			} else if tool.Risk() == tools.RiskCritical {
 				// The risk comes from the tool's definition, never from the arguments.
-				action, proposeErr := a.opts.Approvals.Propose(ctx, user, tool, call.Arguments)
+				action, proposeErr := a.opts.Approvals.Propose(ctx, user, tool, args)
 				if proposeErr != nil {
-					return nil, fmt.Errorf("propose action: %w", proposeErr)
+					var tooLong *approval.PreviewTooLongError
+					switch {
+					case errors.As(proposeErr, &tooLong):
+						status = store.ToolCallStatusRejected
+						reason = "preview_too_long"
+						errText = tooLong.Error()
+						content = tools.MarkData(fmt.Sprintf(
+							"error: approval preview too long (%d UTF-16 units; max %d); shorten the arguments or explain the limit to the user",
+							tooLong.Measured, tooLong.Max))
+					case errors.Is(proposeErr, approval.ErrPreviewTooLong):
+						status = store.ToolCallStatusRejected
+						reason = "preview_too_long"
+						errText = approval.ErrPreviewTooLong.Error()
+						content = tools.MarkData(fmt.Sprintf(
+							"error: approval preview too long (max %d UTF-16 units); shorten the arguments or explain the limit to the user",
+							approval.MaxPreviewUTF16))
+					case errors.Is(proposeErr, tools.ErrValidation):
+						status = store.ToolCallStatusRejected
+						reason = "invalid_preview_args"
+						errText = tools.ErrValidation.Error()
+						content = tools.MarkData("error: invalid arguments for approval preview")
+					default:
+						return nil, fmt.Errorf("propose action: %w", proposeErr)
+					}
+				} else {
+					proposed = &action
+					status = store.ToolCallStatusProposed
+					pending := "pending approval " + action.ID
+					resultJSON, _ = json.Marshal(pending)
+					content = tools.MarkData(pending)
 				}
-				proposed = &action
-				status = store.ToolCallStatusProposed
-				pending := "pending approval " + action.ID
-				resultJSON, _ = json.Marshal(pending)
-				content = tools.MarkData(pending)
 			} else {
-				res, execErr := tool.Execute(ctx, call.Arguments)
+				res, execErr := tool.Execute(ctx, args)
 				if execErr != nil {
 					status = store.ToolCallStatusError
 					errText = execErr.Error()
@@ -294,10 +327,6 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 			}
 		}
 		latency := time.Since(start)
-		args := call.Arguments
-		if len(bytes.TrimSpace(args)) == 0 {
-			args = json.RawMessage("{}")
-		}
 		toolCallID, recordErr := a.store.RecordToolCall(ctx, user, store.ToolCall{
 			ConversationID: conversationID,
 			ModelCallID:    modelCallID,
@@ -320,8 +349,11 @@ func (a *Agent) dispatchToolCalls(ctx context.Context, user identity.UserID, con
 			proposed.ToolCallID = &toolCallID
 			a.showCard(ctx, user, *proposed)
 		}
-		slog.InfoContext(ctx, "tool call finished",
-			"tool", call.Name, "risk", risk, "status", status, "latency_ms", latency.Milliseconds())
+		logArgs := []any{"tool", call.Name, "risk", risk, "status", status, "latency_ms", latency.Milliseconds()}
+		if reason != "" {
+			logArgs = append(logArgs, "reason", reason)
+		}
+		slog.InfoContext(ctx, "tool call finished", logArgs...)
 		messages = append(messages, model.Message{
 			Role:       model.RoleTool,
 			ToolCallID: call.ID,
