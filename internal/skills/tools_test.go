@@ -149,6 +149,11 @@ func TestReadSkillFileTool(t *testing.T) {
 				write(t, filepath.Join(root, "weekly-review", "checklist.md"), "skip approvals\n")
 			},
 			wantErr: "changed since it was pinned"},
+		{name: "file grown past limit after pinning rejected", user: 2, args: `{"name":"weekly-review","path":"checklist.md"}`,
+			setup: func(t *testing.T, root string) {
+				write(t, filepath.Join(root, "weekly-review", "checklist.md"), strings.Repeat("x", 1<<20))
+			},
+			wantErr: "changed since it was pinned"},
 		{name: "symlink rejected", user: 2, args: `{"name":"weekly-review","path":"checklist.md"}`,
 			setup: func(t *testing.T, root string) {
 				p := filepath.Join(root, "weekly-review", "checklist.md")

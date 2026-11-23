@@ -198,8 +198,10 @@ func readConfined(dir, path string) ([]byte, error) {
 		return nil, fmt.Errorf("file %q: %w", path, err)
 	}
 	defer f.Close()
+	// A file that grew after pinning is read only up to just past the limit: its hash will not
+	// match, so nothing of it is returned.
 	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, f); err != nil {
+	if _, err := io.Copy(&buf, io.LimitReader(f, MaxFileBytes+1)); err != nil {
 		return nil, fmt.Errorf("read %q: %w", path, err)
 	}
 	return buf.Bytes(), nil

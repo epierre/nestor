@@ -16,6 +16,20 @@ import (
 // skillFile is the file in a skill folder that holds its front matter and instructions.
 const skillFile = "SKILL.md"
 
+// Size limits. A skill with a larger file is refused whole, never truncated, so instructions and
+// reference files always reach the model complete.
+const (
+	MaxSkillFileBytes = 16 * 1024 // SKILL.md, sent on every load_skill
+	MaxFileBytes      = 32 * 1024 // any other file, one read_skill_file result
+)
+
+func sizeLimit(path string) int64 {
+	if path == skillFile {
+		return MaxSkillFileBytes
+	}
+	return MaxFileBytes
+}
+
 // HashDir computes the pinned hash of a skill folder: SHA-256 over every regular file, in
 // lexical path order, each written as its length-prefixed slash-separated path followed by the
 // SHA-256 of its content. File creation order and timestamps do not matter; any change to a
@@ -26,6 +40,11 @@ func HashDir(fsys fs.FS) (string, error) {
 	return f.sum, err
 }
 
+// hashFS hashes fsys and enforces the size limits.
+func hashFS(fsys fs.FS) (folder, error) {
+	return hashFolder(fsys, true)
+}
+
 // folder is what hashing a skill folder found.
 type folder struct {
 	sum     string
@@ -33,10 +52,10 @@ type folder struct {
 	skillMD []byte                       // the SKILL.md bytes that were hashed
 }
 
-// hashFS hashes fsys as HashDir does. It also keeps the SKILL.md content it hashed, so the
+// hashFolder hashes fsys as HashDir does, checking size limits when limits is set. It also keeps the SKILL.md content it hashed, so the
 // instructions loaded are exactly the bytes checked against the pin, and the hash of every file,
 // so a reference file read later can be checked against what was pinned.
-func hashFS(fsys fs.FS) (folder, error) {
+func hashFolder(fsys fs.FS, limits bool) (folder, error) {
 	h := sha256.New()
 	f := folder{files: map[string][sha256.Size]byte{}}
 	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
@@ -51,9 +70,21 @@ func hashFS(fsys fs.FS) (folder, error) {
 		case !d.Type().IsRegular():
 			return fmt.Errorf("%s is not a regular file", path)
 		}
+		if limits {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if limit := sizeLimit(path); info.Size() > limit {
+				return fmt.Errorf("%s is %d bytes, over the %d-byte limit", path, info.Size(), limit)
+			}
+		}
 		data, err := fs.ReadFile(fsys, path)
 		if err != nil {
 			return err
+		}
+		if limit := sizeLimit(path); limits && int64(len(data)) > limit {
+			return fmt.Errorf("%s is %d bytes, over the %d-byte limit", path, len(data), limit)
 		}
 		content := sha256.Sum256(data)
 		writeEntry(h, path, content)
