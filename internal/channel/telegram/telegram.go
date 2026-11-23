@@ -306,9 +306,19 @@ func (c *Channel) SendApprovalCard(ctx context.Context, action store.PendingActi
 	return nil
 }
 
-// Notify sends text to chatID in one attempt, for notices that must not hold up their caller. A
-// failure is returned, and the caller decides whether to send the notice again later.
+// Notify sends text to chatID in consecutive single-attempt messages within Telegram's size
+// limit, for notices that must not hold up their caller. Empty text sends nothing. A failure is
+// returned immediately without backoff, and the caller decides whether to send again later.
 func (c *Channel) Notify(ctx context.Context, chatID int64, text string) error {
+	for _, part := range split(text) {
+		if err := c.notifyPart(ctx, chatID, part); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Channel) notifyPart(ctx context.Context, chatID int64, text string) error {
 	sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
 	if err := c.do(sendCtx, "sendMessage", sendMessageRequest{ChatID: chatID, Text: text}, nil); err != nil {
