@@ -103,6 +103,44 @@ host). To contain it, the agent talks to a small `sandboxd` sidecar that holds t
 exposes exactly one operation: run this skill's script with these limits. The agent never gets
 the socket.
 
+### sandboxd
+
+`sandboxd` (`cmd/sandboxd`, package `internal/sandbox`) decides on its own what it runs; the
+agent only names a skill and a script:
+
+- It reads the same `skills.yaml` and `skills/` as Nestor (`SKILLS_CONFIG`, `SKILLS_DIR`, mounted
+  read-only), and listens on `SANDBOXD_ADDR` (default `:8080`) on the internal `sandbox` network.
+  It checks the structure of `skills.yaml` but not user IDs: it has no database, and per-user
+  enablement is checked by the agent's `run_skill_script` tool before it calls `sandboxd`.
+- `POST /run` takes exactly `{"skill", "script", "args"}`; any other field (an image, a command,
+  limits, mounts) is refused and logged, as is a body over 64 KiB. Before every run it hashes the
+  skill folder again and runs only if the skill has `scripts: true`, still matches its pin, and
+  `script` is a pinned file of that skill with a known interpreter (`.py` → `python3`, `.sh` →
+  `sh`). It answers `{"exit_code", "output", "truncated", "timed_out", "duration_ms"}`.
+- The image (`nestor-skill-runner`) and every container setting are constants in code. Limits come
+  from `script_limits`, defaulting to timeout 20s, memory 256m and 32 KiB of output.
+- Runs are serialised (one at a time), which keeps the stack inside its memory budget.
+
+Container settings for each run: `NetworkMode: none`, read-only root filesystem, the skill folder
+bind-mounted read-only at `/skill`, tmpfs `/work` and `/tmp` (16 MiB, `noexec,nosuid`), user
+`65532:65532`, `CapDrop: ALL`, `no-new-privileges`, memory and swap at the limit, one CPU, 64
+pids. After the timeout the container is killed; it is force-removed after every run, whatever
+the outcome. Output is stdout and stderr interleaved, read at most to the cap.
+
+Arguments are passed in the `NESTOR_ARGS` environment variable; the image's entrypoint writes it
+to `/work/args.json` with `printf '%s'`, unsets it and `exec`s the interpreter, so arguments are
+never parsed by a shell.
+
+Bind mounts take host paths, but `sandboxd` sees the skills folder at its own mount point. At
+startup it inspects its own container (its hostname is the container ID) and takes the host
+source of the mount at `SKILLS_DIR`; this needs no extra setting. Outside a container, as in
+tests, the folder is used as is.
+
+The `skill-runner` image (`deploy/skill-runner/`) is `python:3.13-alpine` pinned by digest plus
+the entrypoint. Compose builds it only on request (`docker compose --profile build build
+skill-runner`) since no service runs it; `sandboxd` logs an error at startup if it is missing, and
+each run then fails with an error result.
+
 ## Failure modes
 
 - Hash mismatch: skill skipped, logged; others unaffected.
@@ -118,10 +156,11 @@ the socket.
 - `gopkg.in/yaml.v3` parses `skills.yaml` and the `SKILL.md` front matter. The standard library
   has no YAML parser, and a hand-written one would be a larger and riskier parser than this
   dependency. It is a widely used, pure-Go package with no transitive dependencies.
-- `github.com/docker/docker/client` for `sandboxd` to start, wait on and remove containers. The
-  alternative, shelling out to the `docker` CLI, needs the same socket and adds argument-escaping
-  risk, which the JSON-file argument design exists to avoid. The client is used only inside
-  `sandboxd`, not in the agent.
+- No Docker client library. `sandboxd` uses six Docker Engine API calls (inspect, create,
+  start, wait, logs, remove) over the Unix socket with `net/http`. The official client
+  (`github.com/moby/moby/client`, formerly `github.com/docker/docker/client`) would add 19 modules,
+  including OpenTelemetry and containerd packages, for those six calls. Shelling out to the
+  `docker` CLI needs the same socket and adds argument-escaping risk.
 - `sandboxd`: in-repo Go binary that holds the Docker socket and exposes one operation.
 
 ## Testing approach
