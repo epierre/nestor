@@ -13,6 +13,17 @@ The system SHALL load only skills listed in the skills configuration whose file 
 - **WHEN** a file in `skills/weekly-review/` changes after its hash was pinned
 - **THEN** `weekly-review` is not offered to any user, an error naming it is logged, and other skills still work
 
+### Requirement: Skills configuration
+The system SHALL read skills only when a skills configuration file is configured, and SHALL refuse to start when that file is invalid or the skills folder is not configured.
+
+#### Scenario: No skills configured
+- **WHEN** Nestor starts without `SKILLS_CONFIG` set and a user sends "hello"
+- **THEN** startup succeeds, the model request contains no skills block, and `load_skill` returns "unknown skill" for any name
+
+#### Scenario: Invalid skills configuration
+- **WHEN** Nestor starts with a `skills.yaml` that lists the same skill twice
+- **THEN** the process exits with a non-zero status and an error naming the duplicated skill, before serving any message
+
 ### Requirement: Progressive disclosure
 The system SHALL add only the name and description of each skill enabled for the requesting user to the system prompt, within a fixed size cap, and SHALL provide the full instructions only through the `load_skill` tool.
 
