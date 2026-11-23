@@ -43,6 +43,8 @@ func main() {
 		err = runCredentials(context.Background(), os.Args[2:], os.Getenv, os.Stdin, os.Stdout)
 	case len(os.Args) > 1 && os.Args[1] == "mcp":
 		err = runMCP(context.Background(), os.Args[2:], os.Getenv, os.Stdout)
+	case len(os.Args) > 1 && os.Args[1] == "skills":
+		err = skillsCommand(skillsDir, os.Args[2:], os.Stdout)
 	default:
 		err = run()
 	}

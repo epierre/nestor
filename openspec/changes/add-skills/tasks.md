@@ -1,7 +1,7 @@
 ## 1. Loading and pinning
 
 - [x] 1.1 Parse `SKILL.md` front matter and body; parse `skills.yaml`. Test: `skills_test.go` "valid skill parsed", "missing name rejected", "description over cap rejected".
-- [ ] 1.2 Folder hashing and `skills pin` command; skip on mismatch. Test: `skills_test.go` "hash stable across file order", "edited file skipped, others loaded".
+- [x] 1.2 Folder hashing and `skills pin` command; skip on mismatch. Test: `skills_test.go` "hash stable across file order", "edited file skipped, others loaded".
 
 ## 2. Progressive disclosure
 
