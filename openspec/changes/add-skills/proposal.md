@@ -21,6 +21,8 @@ reviewed: instructions can try to steer the agent, and bundled scripts are arbit
   enabled skill in a throwaway container with no network and no access to host data. It is
   disabled by default and enabled per skill.
 - Content pinning: a skill whose files no longer match the pinned hash is not loaded.
+- Size limits: `SKILL.md` up to 16 KiB, other files up to 32 KiB; a larger skill is refused, never
+  truncated.
 - Two new environment variables, `SKILLS_CONFIG` (path of `skills.yaml`; unset means no skills)
   and `SKILLS_DIR` (the skills folder), both mounted read-only by `deploy/docker-compose.yml`.
 - Owner-authored skills live in the same directory and follow the same rules.

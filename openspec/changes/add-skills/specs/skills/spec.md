@@ -56,6 +56,17 @@ The system SHALL let `read_skill_file` return only regular files inside the name
 - **WHEN** the model calls `read_skill_file("weekly-review", "../../config/mcp.yaml")`
 - **THEN** the call is rejected with an error result and no file content is returned
 
+### Requirement: Skill size limits
+The system SHALL refuse to pin, and SHALL skip and log at load, a skill whose `SKILL.md` is larger than 16 KiB or whose folder contains any other file larger than 32 KiB, so instructions and reference files always reach the model whole and are never truncated.
+
+#### Scenario: Oversized reference file
+- **WHEN** `skills/weekly-review/history.md` is 40 KiB and `weekly-review` is listed in `skills.yaml`
+- **THEN** `nestor skills pin weekly-review` fails with an error naming `history.md`, and at startup `weekly-review` is not offered to any user, an error naming it is logged, and other skills still work
+
+#### Scenario: Oversized instructions
+- **WHEN** `skills/weekly-review/SKILL.md` is 20 KiB
+- **THEN** `nestor skills pin weekly-review` fails with an error naming `SKILL.md`, and at startup `weekly-review` is skipped and logged
+
 ### Requirement: Sandboxed scripts
 The system SHALL run a skill script only if scripts are enabled for that skill, only scripts bundled in that skill's folder, and only in a fresh sandbox with no network, a read-only skill mount, no host data, resource limits and a timeout.
 

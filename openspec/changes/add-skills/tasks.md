@@ -8,6 +8,7 @@
 
 - [x] 2.1 System prompt block of enabled skills per user, with per-description and total caps. Test: `prompt_test.go` "only enabled skills listed", "block within cap", "no instructions in prompt".
 - [x] 2.2 `load_skill` and `read_skill_file` tools with per-user checks, path confinement and tool call logging. Test: `tools_test.go` "load enabled skill", "other user's skill is unknown", "traversal rejected", "symlink rejected", "load recorded in tool call log", "skill content cannot register a tool or change a risk level" (the skip-approval scenario, checked at registry level; the model-level version is in 4.1).
+- [ ] 2.3 Enforce the size limits while hashing: `skills pin` refuses and `Load` skips a skill with an oversized `SKILL.md` or reference file. Test: `load_test.go` "oversized reference file skipped", "oversized SKILL.md skipped", "file at limit loaded"; `cmd/nestor/skills_test.go` "pin refuses oversized file".
 
 ## 3. Script sandbox
 

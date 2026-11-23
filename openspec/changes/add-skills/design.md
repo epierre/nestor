@@ -66,6 +66,20 @@ Descriptions are capped (200 characters) and the block is capped in total, so ad
 cannot crowd out the conversation. The body is only loaded by `load_skill`, and its content is
 returned as a tool message marked as skill instructions from a reviewed source.
 
+## Size limits
+
+Fixed in code, like the description cap, and checked while hashing a folder:
+
+| File | Limit | Rationale |
+|---|---|---|
+| `SKILL.md` | 16 KiB (~4k tokens) | Paid on every `load_skill`; room for detailed instructions |
+| Any other file | 32 KiB (~8k tokens) | Same order as the script output cap; bounds one `read_skill_file` result |
+
+An oversized file makes the whole skill invalid: `nestor skills pin` refuses it and `Load` skips it
+with an error, as for a hash mismatch. Nothing is truncated, because half of a skill's
+instructions can be worse than none, and the owner learns about it at review time rather than
+when the skill is used. Raising a limit is a code change.
+
 ## Built-in tools
 
 | Tool | Risk | Behaviour |
@@ -93,6 +107,7 @@ the socket.
 
 - Hash mismatch: skill skipped, logged; others unaffected.
 - Script timeout or OOM: tool result describes the failure; run recorded with status error.
+- File over its size limit: skill refused by `skills pin`, skipped and logged at load.
 - `skills.yaml` invalid, or `SKILLS_CONFIG` set without `SKILLS_DIR`: startup fails with an error
   naming the problem.
 - `sandboxd` down: `run_skill_script` returns an error result; instruction-only skills still work.
