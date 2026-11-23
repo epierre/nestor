@@ -137,6 +137,17 @@ type ScriptLimits struct {
 // LoadConfig decodes skills.yaml from r and validates it against knownUsers. Unknown keys are
 // rejected so a misspelled field fails at startup instead of being silently ignored.
 func LoadConfig(r io.Reader, knownUsers []identity.UserID) (Config, error) {
+	return decodeConfig(r, true, knownUsers)
+}
+
+// DecodeConfig decodes and validates skills.yaml like LoadConfig, except that user IDs are not
+// checked against existing users. It is for sandboxd, which has no database and never decides
+// which user may use a skill.
+func DecodeConfig(r io.Reader) (Config, error) {
+	return decodeConfig(r, false, nil)
+}
+
+func decodeConfig(r io.Reader, checkUsers bool, knownUsers []identity.UserID) (Config, error) {
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
 
@@ -144,13 +155,13 @@ func LoadConfig(r io.Reader, knownUsers []identity.UserID) (Config, error) {
 	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("decode skills.yaml: %w", err)
 	}
-	if err := validateConfig(c, knownUsers); err != nil {
+	if err := validateConfig(c, checkUsers, knownUsers); err != nil {
 		return Config{}, fmt.Errorf("invalid skills.yaml: %w", err)
 	}
 	return c, nil
 }
 
-func validateConfig(c Config, knownUsers []identity.UserID) error {
+func validateConfig(c Config, checkUsers bool, knownUsers []identity.UserID) error {
 	var errs []error
 	seen := make(map[string]bool, len(c.Skills))
 	for _, e := range c.Skills {
@@ -173,7 +184,10 @@ func validateConfig(c Config, knownUsers []identity.UserID) error {
 			fail("has malformed hash %q", e.Hash)
 		}
 		for _, u := range e.Users {
-			if u != "*" && !isKnownUser(u, knownUsers) {
+			if u == "*" {
+				continue
+			}
+			if _, err := strconv.ParseInt(u, 10, 64); err != nil || (checkUsers && !isKnownUser(u, knownUsers)) {
 				fail("refers to unknown user %q", u)
 			}
 		}

@@ -135,6 +135,19 @@ func Load(root string, cfg Config, log *slog.Logger) []Loaded {
 	return out
 }
 
+// Verify loads the skill e from root/<name> again, failing unless its folder still matches the
+// pin and its SKILL.md is valid. sandboxd calls it before every run.
+func Verify(root string, e Entry) (Loaded, error) {
+	return loadOne(root, e)
+}
+
+// HasFile reports whether path (slash-separated, relative to the skill folder) is a file that was
+// pinned with the skill.
+func (l Loaded) HasFile(path string) bool {
+	_, ok := l.files[path]
+	return ok
+}
+
 func loadOne(root string, e Entry) (Loaded, error) {
 	f, err := readFolder(root, e.Name)
 	if err != nil {

@@ -39,6 +39,7 @@ services:
       - default
       - database
       - mcp
+      - sandbox
     read_only: true
     cap_drop:
       - ALL
@@ -62,6 +63,41 @@ services:
     security_opt:
       - no-new-privileges:true
     mem_limit: 64m
+
+  # Runs skill scripts in throwaway containers. It alone holds the Docker socket (root-equivalent
+  # on the host), so it is on the internal sandbox network only, reachable by Nestor alone, and
+  # accepts a single operation. The script containers it starts have no network at all.
+  sandboxd:
+    build:
+      context: ..
+      dockerfile: deploy/sandboxd.Dockerfile
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      SKILLS_CONFIG: /etc/nestor/skills.yaml
+      SKILLS_DIR: /etc/nestor/skills
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../config/skills.yaml:/etc/nestor/skills.yaml:ro
+      - ../skills:/etc/nestor/skills:ro
+    networks:
+      - sandbox
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+
+  # Image for skill scripts. Never started by Compose: sandboxd starts one container per run.
+  # Build it with: docker compose --profile build build skill-runner
+  skill-runner:
+    profiles: ["build"]
+    image: nestor-skill-runner
+    build:
+      context: ..
+      dockerfile: deploy/skill-runner/Dockerfile
+    network_mode: none
 
   postgres:
     image: pgvector/pgvector:0.8.6-pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
@@ -110,6 +146,9 @@ networks:
     internal: true
   # No route out, and neither Postgres nor LiteLLM is attached: MCP servers can reach only Nestor.
   mcp:
+    internal: true
+  # No route out, and only Nestor and sandboxd are attached: Nestor's way to request script runs.
+  sandbox:
     internal: true
 
 volumes:

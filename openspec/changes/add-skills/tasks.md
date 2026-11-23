@@ -12,7 +12,7 @@
 
 ## 3. Script sandbox
 
-- [ ] 3.1 `skill-runner` image and `sandboxd` sidecar exposing a single run operation with limits, added to `deploy/docker-compose.yml` on an internal network with no route out, attached to neither Postgres nor LiteLLM, with no published port. Test: integration `sandboxd_test.go` "network unavailable", "read-only mount", "timeout kills and removes container", "arbitrary image refused"; `docker compose config` succeeds.
+- [x] 3.1 `skill-runner` image and `sandboxd` sidecar exposing a single run operation with limits, added to `deploy/docker-compose.yml` on an internal network with no route out, attached to neither Postgres nor LiteLLM, with no published port. Test: integration `sandboxd_test.go` "network unavailable", "read-only mount", "timeout kills and removes container", "arbitrary image refused"; `docker compose config` succeeds.
 - [ ] 3.2 `run_skill_script` tool (risk reversible) calling `sandboxd`, args via JSON file, output capped and recorded. Test: `tools_test.go` "scripts disabled returns error", "output truncated with marker", "run recorded".
 
 ## 4. Evals and wrap-up

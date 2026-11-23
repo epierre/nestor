@@ -95,6 +95,7 @@ Changes 9 and 10 depend only on change 2 and can be pulled earlier.
 ```
 cmd/nestor/          Entrypoint
 cmd/mcp-timezone/    Reference MCP server: read-only time zone tools
+cmd/sandboxd/        Sidecar that runs skill scripts in throwaway containers with no network
 config/mcp.yaml      MCP servers Nestor may use, with the risk of each allowlisted tool
 config/skills.yaml   Reviewed skills, their pinned hashes and the users who get them
 skills/              Skill folders (SKILL.md plus reference files), one per skill
@@ -116,9 +117,12 @@ Anthropic API key only if you enable an Anthropic model in [`deploy/litellm.yaml
 ```sh
 cp deploy/.env.example deploy/.env   # then replace every value
 docker compose -f deploy/docker-compose.yml up -d --build
+docker compose -f deploy/docker-compose.yml --profile build build skill-runner   # image for skill scripts
 ```
 
-Nestor applies database migrations and syncs the allowlist each time it starts.
+Nestor applies database migrations and syncs the allowlist each time it starts. The
+`skill-runner` image is never started by Compose: `sandboxd`, the only service given the Docker
+socket, starts one throwaway container from it per skill script run, with no network.
 
 ### Environment variables
 
