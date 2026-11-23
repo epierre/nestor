@@ -97,6 +97,13 @@ func run() error {
 	if err := skills.RegisterTools(registry, catalog); err != nil {
 		return fmt.Errorf("register skill tools: %w", err)
 	}
+	var sandboxClient *skills.SandboxClient
+	if cfg.SandboxdURL != "" {
+		sandboxClient = skills.NewSandboxClient(cfg.SandboxdURL)
+	}
+	if err := skills.RegisterScriptTool(registry, catalog, sandboxClient); err != nil {
+		return fmt.Errorf("register skill tools: %w", err)
+	}
 	// MCP supervisors get their own context, so that whatever ends run, they are stopped before
 	// it returns rather than waited on while still running.
 	mcpCtx, stopMCP := context.WithCancel(ctx)

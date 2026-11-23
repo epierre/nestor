@@ -147,6 +147,7 @@ Set these in `deploy/.env`, which git ignores (validated by [`internal/config/co
 | `MCP_CONFIG` | No | Path of the reviewed `mcp.yaml`. Set by `docker-compose.yml`, which mounts [`config/mcp.yaml`](config/mcp.yaml). Unset: no MCP servers |
 | `SKILLS_CONFIG` | No | Path of the reviewed `skills.yaml`. Set by `docker-compose.yml`, which mounts [`config/skills.yaml`](config/skills.yaml). Unset: no skills |
 | `SKILLS_DIR` | With `SKILLS_CONFIG` | Folder with one subfolder per skill. Set by `docker-compose.yml`, which mounts [`skills/`](skills/) read-only |
+| `SANDBOXD_URL` | No | Where Nestor asks `sandboxd` to run skill scripts; must be an `http` URL to an internal host. Set by `docker-compose.yml` to `http://sandboxd:8080`. Unset: skill scripts are unavailable |
 | `ADMIN_USER_ID` | No | Internal user ID (not a Telegram ID) who receives operational alerts, such as an MCP tool waiting for `nestor mcp approve`. Unset: alerts are only logged |
 
 ### Using the bot

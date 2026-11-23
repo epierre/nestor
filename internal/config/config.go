@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -50,6 +51,9 @@ type Config struct {
 	SkillsConfigPath string
 	// SkillsDir holds one folder per skill. Required when SkillsConfigPath is set.
 	SkillsDir string
+	// SandboxdURL is where sandboxd runs skill scripts, an http URL to an internal host. Empty:
+	// scripts are unavailable.
+	SandboxdURL string
 	// AdminUserID is the internal user who receives operational alerts, such as an MCP tool
 	// waiting for approval. Zero when unset; alerts are then only logged.
 	AdminUserID identity.UserID
@@ -149,6 +153,10 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.SkillsConfigPath != "" && cfg.SkillsDir == "" {
 		errs = append(errs, errors.New("SKILLS_DIR is required when SKILLS_CONFIG is set"))
 	}
+	cfg.SandboxdURL = get("SANDBOXD_URL")
+	if cfg.SandboxdURL != "" && !isInternalHTTPURL(cfg.SandboxdURL) {
+		errs = append(errs, errors.New("SANDBOXD_URL must be an http URL to an internal host, such as http://sandboxd:8080"))
+	}
 
 	if raw := get("ADMIN_USER_ID"); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)
@@ -170,6 +178,24 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// isInternalHTTPURL reports whether raw is an http URL whose host stays on the host machine: a
+// Compose service name (no dot), localhost, or a loopback, private or link-local address.
+func isInternalHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	switch {
+	case host == "":
+		return false
+	case host == "localhost" || !strings.Contains(host, ".") && net.ParseIP(host) == nil:
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
 }
 
 func isHTTPURL(raw string) bool {

@@ -28,11 +28,12 @@ const RunnerImage = "nestor-skill-runner"
 // runLabel marks containers started by sandboxd; its value is the skill name.
 const runLabel = "org.nestor.skill-run"
 
-// Defaults for a skill with scripts enabled and no script_limits.
+// Defaults for a skill with scripts enabled and no script_limits, shared with the agent's
+// run_skill_script tool.
 const (
-	DefaultTimeout        = 20 * time.Second
-	DefaultMemory         = "256m"
-	DefaultMaxOutputBytes = 32 * 1024
+	DefaultTimeout        = skills.DefaultScriptTimeout
+	DefaultMemory         = skills.DefaultScriptMemory
+	DefaultMaxOutputBytes = skills.DefaultScriptMaxOutputBytes
 )
 
 // runUser runs every script. The tmpfs work folders belong to it, since a tmpfs is otherwise

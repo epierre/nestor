@@ -433,3 +433,44 @@ func TestSkillsPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxdURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"sandboxd url read", "http://sandboxd:8080", false},
+		{"unset means no sandbox", "", false},
+		{"localhost accepted", "http://localhost:8080", false},
+		{"private address accepted", "http://10.1.2.3:8080", false},
+		{"public sandboxd url rejected", "http://sandbox.example.com:8080", true},
+		{"public address rejected", "http://8.8.8.8:8080", true},
+		{"https rejected", "https://sandboxd:8080", true},
+		{"missing scheme rejected", "runner-host:9000", true},
+		{"missing host rejected", "http://", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			env["SANDBOXD_URL"] = tt.value
+			cfg, err := load(env)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "SANDBOXD_URL must be an http URL to an internal host") {
+					t.Fatalf("Load() error = %v, want SANDBOXD_URL rejected", err)
+				}
+				// "http://" alone also appears in the example the message gives.
+				if tt.value != "http://" && strings.Contains(err.Error(), tt.value) {
+					t.Errorf("error %q quotes the value", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.SandboxdURL != tt.value {
+				t.Errorf("SandboxdURL = %q, want %q", cfg.SandboxdURL, tt.value)
+			}
+		})
+	}
+}

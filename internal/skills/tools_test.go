@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -343,5 +347,212 @@ func TestSkillContentCannotRegisterToolOrChangeRisk(t *testing.T) {
 	}
 	if _, err := reg.Lookup("send_everything"); err == nil {
 		t.Error("skill content registered a tool")
+	}
+}
+
+// fakeSandboxd answers POST /run with reply and records the requests it gets.
+type fakeSandboxd struct {
+	mu       sync.Mutex
+	requests []map[string]json.RawMessage
+	reply    func(w http.ResponseWriter)
+}
+
+func (f *fakeSandboxd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var body map[string]json.RawMessage
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	f.mu.Lock()
+	f.requests = append(f.requests, body)
+	f.mu.Unlock()
+	if r.Method != http.MethodPost || r.URL.Path != "/run" {
+		http.NotFound(w, r)
+		return
+	}
+	f.reply(w)
+}
+
+func (f *fakeSandboxd) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests)
+}
+
+func replyJSON(code int, body string) func(http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = io.WriteString(w, body)
+	}
+}
+
+// scriptCatalog loads "scorer" (scripts enabled, user 1 only, 64-byte output cap) and
+// "weekly-review" (scripts disabled, everyone).
+func scriptCatalog(t *testing.T) *skills.Catalog {
+	t.Helper()
+	root := t.TempDir()
+	write(t, filepath.Join(root, "scorer", "SKILL.md"), "---\nname: scorer\ndescription: Score items.\n---\nRun scripts/score.py.\n")
+	write(t, filepath.Join(root, "scorer", "scripts", "score.py"), "print(1)\n")
+	write(t, filepath.Join(root, "weekly-review", "SKILL.md"), weeklyMD)
+	write(t, filepath.Join(root, "weekly-review", "scripts", "x.py"), "print(1)\n")
+	pin := func(name string) string {
+		h, err := skills.HashDir(os.DirFS(filepath.Join(root, name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	cfg := skills.Config{Skills: []skills.Entry{
+		{Name: "scorer", Hash: pin("scorer"), Users: []string{"1"}, Scripts: true,
+			ScriptLimits: skills.ScriptLimits{Timeout: 5 * time.Second, MaxOutputBytes: 64}},
+		{Name: "weekly-review", Hash: pin("weekly-review"), Users: []string{"*"}},
+	}}
+	loaded := skills.Load(root, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if len(loaded) != 2 {
+		t.Fatalf("loaded %d skills", len(loaded))
+	}
+	return skills.NewCatalog(loaded)
+}
+
+func TestRunSkillScriptTool(t *testing.T) {
+	ok := replyJSON(200, `{"exit_code":0,"output":"score: 7\n","truncated":false,"timed_out":false,"duration_ms":412}`)
+	tests := []struct {
+		name        string
+		user        identity.UserID
+		args        string
+		noSandbox   bool
+		reply       func(http.ResponseWriter)
+		want        []string
+		wantErr     string
+		wantTrunc   bool
+		wantRequest bool
+	}{
+		{name: "runs a bundled script", user: 1, args: `{"name":"scorer","script":"scripts/score.py","args":{"items":[1,2]}}`, reply: ok,
+			want: []string{"exit status 0", "412 ms", "score: 7\n", "9 bytes"}, wantRequest: true},
+		{name: "non-zero exit is a result", user: 1, args: `{"name":"scorer","script":"scripts/score.py"}`,
+			reply: replyJSON(200, `{"exit_code":3,"output":"boom\n","duration_ms":5}`), want: []string{"exit status 3", "boom"}, wantRequest: true},
+		{name: "scripts disabled returns error", user: 1, args: `{"name":"weekly-review","script":"scripts/x.py"}`, reply: ok,
+			wantErr: `skill "weekly-review" has scripts disabled`},
+		{name: "sandbox not configured returns error", user: 1, args: `{"name":"scorer","script":"scripts/score.py"}`, noSandbox: true,
+			wantErr: "scripts are unavailable"},
+		{name: "other user's skill is unknown", user: 2, args: `{"name":"scorer","script":"scripts/score.py"}`, reply: ok,
+			wantErr: `unknown skill "scorer"`},
+		{name: "unbundled script rejected", user: 1, args: `{"name":"scorer","script":"../weekly-review/scripts/x.py"}`, reply: ok,
+			wantErr: "not a bundled script"},
+		{name: "output truncated with marker", user: 1, args: `{"name":"scorer","script":"scripts/score.py"}`,
+			reply: replyJSON(200, `{"exit_code":0,"output":"`+strings.Repeat("a", 64)+`","truncated":true,"duration_ms":5}`),
+			want:  []string{strings.Repeat("a", 64) + "\n[output truncated at 64 bytes]"}, wantTrunc: true, wantRequest: true},
+		{name: "oversized output from sandboxd capped", user: 1, args: `{"name":"scorer","script":"scripts/score.py"}`,
+			reply: replyJSON(200, `{"exit_code":0,"output":"`+strings.Repeat("b", 500)+`","truncated":false,"duration_ms":5}`),
+			want:  []string{strings.Repeat("b", 64) + "\n[output truncated at 64 bytes]"}, wantTrunc: true, wantRequest: true},
+		{name: "timeout returns error", user: 1, args: `{"name":"scorer","script":"scripts/score.py"}`,
+			reply:   replyJSON(200, `{"exit_code":-1,"output":"partial","timed_out":true,"duration_ms":5000}`),
+			wantErr: "timed out after 5s", wantRequest: true},
+		{name: "refusal returns error", user: 1, args: `{"name":"scorer","script":"scripts/score.py"}`,
+			reply:   replyJSON(400, `{"error":"refused: skill \"scorer\": content does not match pinned hash"}`),
+			wantErr: "sandbox refused the run: refused: skill", wantRequest: true},
+		{name: "sandbox failure returns error", user: 1, args: `{"name":"scorer","script":"scripts/score.py"}`,
+			reply: replyJSON(502, `{"error":"create container: no such image"}`), wantErr: "sandbox failed: create container", wantRequest: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sd := &fakeSandboxd{reply: tt.reply}
+			srv := httptest.NewServer(sd)
+			defer srv.Close()
+			var client *skills.SandboxClient
+			if !tt.noSandbox {
+				client = skills.NewSandboxClient(srv.URL)
+			}
+			tool := skills.NewRunSkillScriptTool(scriptCatalog(t), client)
+			if tool.Name() != "run_skill_script" || tool.Risk() != tools.RiskReversible {
+				t.Fatalf("run_skill_script is %q with risk %q", tool.Name(), tool.Risk())
+			}
+
+			res, err := run(t, tool, tt.user, tt.args)
+			if got := sd.count() > 0; got != tt.wantRequest {
+				t.Fatalf("request sent = %v, want %v", got, tt.wantRequest)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(res.Content, w) {
+					t.Errorf("content %q lacks %q", res.Content, w)
+				}
+			}
+			if res.Truncated != tt.wantTrunc {
+				t.Errorf("truncated = %v, want %v", res.Truncated, tt.wantTrunc)
+			}
+		})
+	}
+}
+
+func TestRunSkillScriptSendsOnlySkillScriptArgs(t *testing.T) {
+	sd := &fakeSandboxd{reply: replyJSON(200, `{"exit_code":0,"output":"","duration_ms":1}`)}
+	srv := httptest.NewServer(sd)
+	defer srv.Close()
+	tool := skills.NewRunSkillScriptTool(scriptCatalog(t), skills.NewSandboxClient(srv.URL))
+	if _, err := run(t, tool, 1, `{"name":"scorer","script":"scripts/score.py","args":{"q":"x"}}`); err != nil {
+		t.Fatal(err)
+	}
+	got := sd.requests[0]
+	if len(got) != 3 || string(got["skill"]) != `"scorer"` || string(got["script"]) != `"scripts/score.py"` || string(got["args"]) != `{"q":"x"}` {
+		t.Fatalf("request %v, want exactly skill, script and args", got)
+	}
+}
+
+func TestRunRecorded(t *testing.T) {
+	sd := &fakeSandboxd{reply: replyJSON(200, `{"exit_code":2,"output":"`+strings.Repeat("c", 64)+`","truncated":true,"duration_ms":412}`)}
+	srv := httptest.NewServer(sd)
+	defer srv.Close()
+	reg := tools.NewRegistry()
+	if err := skills.RegisterScriptTool(reg, scriptCatalog(t), skills.NewSandboxClient(srv.URL)); err != nil {
+		t.Fatalf("RegisterScriptTool: %v", err)
+	}
+	st := testutil.NewFakeStore()
+	client := toolCallsThenReply(model.ToolCall{ID: "c1", Name: "run_skill_script",
+		Arguments: json.RawMessage(`{"name":"scorer","script":"scripts/score.py"}`)})
+	a := agent.New(client, st, agent.Options{Model: "cheap", HistoryLimit: 30, MaxIterations: 8, Tools: reg})
+	if _, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "score my items"); err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+
+	calls := st.ToolCalls(1)
+	if len(calls) != 1 {
+		t.Fatalf("recorded %d tool calls, want 1", len(calls))
+	}
+	c := calls[0]
+	if c.UserID != 1 || c.ToolName != "run_skill_script" || c.Risk != tools.RiskReversible || c.Status != store.ToolCallStatusTruncated {
+		t.Errorf("recorded %+v, want user 1, run_skill_script, reversible, truncated", c)
+	}
+	for _, w := range []string{`"scorer"`, `"scripts/score.py"`} {
+		if !strings.Contains(string(c.ArgsJSON), w) {
+			t.Errorf("args %s lack %s", c.ArgsJSON, w)
+		}
+	}
+	var result string
+	if err := json.Unmarshal(c.ResultJSON, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []string{"exit status 2", "412 ms", "64 bytes"} {
+		if !strings.Contains(result, w) {
+			t.Errorf("recorded result %q lacks %q", result, w)
+		}
+	}
+	if c.Latency <= 0 {
+		t.Errorf("latency %v not recorded", c.Latency)
+	}
+	if len(st.ToolCalls(2)) != 0 {
+		t.Error("user 1's run was recorded for user 2")
+	}
+	// Script output reaches the model only as a tool message.
+	for _, m := range client.Requests()[1].Messages {
+		if strings.Contains(m.Content, "ccccc") && m.Role != model.RoleTool {
+			t.Errorf("script output reached the model in a %s message", m.Role)
+		}
 	}
 }
