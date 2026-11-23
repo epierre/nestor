@@ -1895,3 +1895,333 @@ func TestSkillsListedNotLoaded(t *testing.T) {
 		}
 	}
 }
+
+type failingPreviewCriticalTool struct{}
+
+func (failingPreviewCriticalTool) Name() string        { return "bad_preview" }
+func (failingPreviewCriticalTool) Description() string { return "fails preview validation" }
+func (failingPreviewCriticalTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+func (failingPreviewCriticalTool) Risk() tools.Risk { return tools.RiskCritical }
+func (failingPreviewCriticalTool) Preview(json.RawMessage) (string, error) {
+	return "", fmt.Errorf("%w: invalid preview args", tools.ErrValidation)
+}
+func (failingPreviewCriticalTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
+	return tools.Result{Content: "ok"}, nil
+}
+
+type failingProposeStore struct {
+	*testutil.FakeStore
+	err error
+}
+
+func (f failingProposeStore) ProposeAction(context.Context, identity.UserID, store.PendingAction) error {
+	return f.err
+}
+
+func TestDispatchToolCallsProposalRejections(t *testing.T) {
+	setupMCP := func(t *testing.T, reg *tools.Registry) {
+		t.Helper()
+		ctx := context.Background()
+		srv := sdk.NewServer(&sdk.Implementation{Name: "todoist", Version: "0"}, nil)
+		okHandler := func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "ok"}}}, nil
+		}
+		srv.AddTool(&sdk.Tool{Name: "delete_task", InputSchema: map[string]any{"type": "object"}}, okHandler)
+		srv.AddTool(&sdk.Tool{Name: "lock_doors", InputSchema: map[string]any{"type": "object"}}, okHandler)
+		serverT, clientT := sdk.NewInMemoryTransports()
+		if _, err := srv.Connect(ctx, serverT, nil); err != nil {
+			t.Fatalf("server connect: %v", err)
+		}
+		session, err := mcp.Connect(ctx, clientT)
+		if err != nil {
+			t.Fatalf("mcp.Connect: %v", err)
+		}
+		t.Cleanup(func() { _ = session.Close() })
+		server := mcpconfig.Server{
+			Name: "todoist", Transport: "http", Credentials: "none", Users: []string{"*"},
+			Tools: map[string]mcpconfig.Tool{
+				"delete_task": {Risk: tools.RiskCritical},
+				"lock_doors":  {Risk: tools.RiskCritical},
+			},
+		}
+		if err := (&mcp.Registrar{Registry: reg, Pins: approvingPins{}}).Register(ctx, server, session); err != nil {
+			t.Fatalf("Register MCP: %v", err)
+		}
+	}
+
+	t.Run("oversized notify_self call is recoverable and preserves prior pending action", func(t *testing.T) {
+		var logs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&logs, nil))))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+		st := testutil.NewFakeStore()
+		gate := approval.New(st, reg, time.Hour)
+		notifyTool, _ := reg.Lookup("notify_self")
+		prior, err := gate.Propose(identity.WithUser(context.Background(), 1), 1, notifyTool, json.RawMessage(`{"text":"Earlier valid"}`))
+		if err != nil {
+			t.Fatalf("prior Propose: %v", err)
+		}
+
+		sentinel := "OVERSIZED-SECRET-" + strings.Repeat("a", approval.MaxPreviewUTF16)
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{{
+				ID:        "call_big",
+				Name:      "notify_self",
+				Arguments: json.RawMessage(`{"text":"` + sentinel + `"}`),
+			}}},
+			{Content: "That message is too long for an approval card."},
+		}
+		var turn int
+		client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+			resp := turns[turn]
+			turn++
+			return resp, nil
+		}}
+		opts := testOptions()
+		opts.Tools = reg
+		opts.Approvals = gate
+		a := New(client, st, opts)
+
+		ctx := obs.WithRequestID(identity.WithUser(context.Background(), 1), "req-oversized")
+		reply, err := a.HandleMessage(ctx, "send a huge alert")
+		if err != nil {
+			t.Fatalf("HandleMessage failed instead of recovering: %v", err)
+		}
+		if reply != "That message is too long for an approval card." {
+			t.Errorf("reply = %q", reply)
+		}
+
+		toolMsg := toolResult(t, client, "call_big")
+		if !strings.HasPrefix(toolMsg, "[data]\n") ||
+			strings.Contains(toolMsg, "invalid arguments") ||
+			!strings.Contains(toolMsg, "3900") ||
+			!strings.Contains(toolMsg, strconv.Itoa(len("Notify yourself: ")+len(sentinel))) {
+			t.Errorf("unexpected tool error message: %q", toolMsg)
+		}
+
+		pending := st.PendingActions(1)
+		if len(pending) != 1 || pending[0].ID != prior.ID || pending[0].State != store.PendingProposed {
+			t.Errorf("pending actions = %+v, want only prior %s still proposed", pending, prior.ID)
+		}
+
+		calls := st.ToolCalls(1)
+		if len(calls) != 1 || calls[0].Status != store.ToolCallStatusRejected {
+			t.Fatalf("tool calls = %+v, want 1 rejected", calls)
+		}
+		if strings.Contains(calls[0].Error, sentinel) {
+			t.Errorf("tool_calls.Error leaked sentinel")
+		}
+
+		rawLogs := logs.String()
+		if strings.Contains(rawLogs, sentinel) {
+			t.Errorf("logs leaked sentinel:\n%s", rawLogs)
+		}
+		if !strings.Contains(rawLogs, `"reason":"preview_too_long"`) {
+			t.Errorf("logs missing reason=preview_too_long:\n%s", rawLogs)
+		}
+	})
+
+	t.Run("oversized critical MCP call is recoverable", func(t *testing.T) {
+		reg := tools.NewRegistry()
+		setupMCP(t, reg)
+		st := testutil.NewFakeStore()
+		gate := approval.New(st, reg, time.Hour)
+
+		sentinel := strings.Repeat("x", approval.MaxPreviewUTF16)
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{{
+				ID:        "call_mcp_big",
+				Name:      "todoist__delete_task",
+				Arguments: json.RawMessage(`{"reason":"` + sentinel + `"}`),
+			}}},
+			{Content: "Too long for MCP approval."},
+		}
+		var turn int
+		client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+			resp := turns[turn]
+			turn++
+			return resp, nil
+		}}
+		opts := testOptions()
+		opts.Tools = reg
+		opts.Approvals = gate
+		a := New(client, st, opts)
+
+		reply := send(t, a, 1, "delete task")
+		if reply != "Too long for MCP approval." {
+			t.Errorf("reply = %q", reply)
+		}
+		toolMsg := toolResult(t, client, "call_mcp_big")
+		if !strings.HasPrefix(toolMsg, "[data]\n") || !strings.Contains(toolMsg, "3900") {
+			t.Errorf("toolMsg = %q, want [data] error naming 3900", toolMsg)
+		}
+		if len(st.PendingActions(1)) != 0 {
+			t.Errorf("unexpected pending action stored")
+		}
+		if calls := st.ToolCalls(1); len(calls) != 1 || calls[0].Status != store.ToolCallStatusRejected {
+			t.Errorf("calls = %+v, want 1 rejected", calls)
+		}
+	})
+
+	t.Run("duplicate-key call rejected cleanly", func(t *testing.T) {
+		var logs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&logs, nil))))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+		st := testutil.NewFakeStore()
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{{
+				ID:        "call_dup",
+				Name:      "notify_self",
+				Arguments: json.RawMessage(`{"text":"secret-1","\u0074ext":"secret-2"}`),
+			}}},
+			{Content: "Duplicate keys rejected."},
+		}
+		var turn int
+		client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+			resp := turns[turn]
+			turn++
+			return resp, nil
+		}}
+		opts := testOptions()
+		opts.Tools = reg
+		opts.Approvals = approval.New(st, reg, time.Hour)
+		a := New(client, st, opts)
+
+		reply := send(t, a, 1, "dup")
+		if reply != "Duplicate keys rejected." {
+			t.Errorf("reply = %q", reply)
+		}
+		toolMsg := toolResult(t, client, "call_dup")
+		if !strings.HasPrefix(toolMsg, "[data]\n") || !strings.Contains(toolMsg, "invalid arguments") {
+			t.Errorf("toolMsg = %q", toolMsg)
+		}
+		if len(st.PendingActions(1)) != 0 {
+			t.Errorf("unexpected pending action")
+		}
+		if calls := st.ToolCalls(1); len(calls) != 1 || calls[0].Status != store.ToolCallStatusRejected {
+			t.Errorf("calls = %+v, want 1 rejected", calls)
+		}
+		if raw := logs.String(); strings.Contains(raw, "secret-1") || !strings.Contains(raw, `"reason":"invalid_arguments"`) {
+			t.Errorf("logs = %s", raw)
+		}
+	})
+
+	t.Run("preview validation error during Propose is recoverable", func(t *testing.T) {
+		var logs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&logs, nil))))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		reg := tools.NewRegistry()
+		_ = reg.Register(failingPreviewCriticalTool{})
+		st := testutil.NewFakeStore()
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{{
+				ID:        "call_bad_preview",
+				Name:      "bad_preview",
+				Arguments: json.RawMessage(`{"a":1}`),
+			}}},
+			{Content: "Preview validation rejected."},
+		}
+		var turn int
+		client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+			resp := turns[turn]
+			turn++
+			return resp, nil
+		}}
+		opts := testOptions()
+		opts.Tools = reg
+		opts.Approvals = approval.New(st, reg, time.Hour)
+		a := New(client, st, opts)
+
+		reply := send(t, a, 1, "bad preview")
+		if reply != "Preview validation rejected." {
+			t.Errorf("reply = %q", reply)
+		}
+		if calls := st.ToolCalls(1); len(calls) != 1 || calls[0].Status != store.ToolCallStatusRejected {
+			t.Errorf("calls = %+v, want 1 rejected", calls)
+		}
+		if !strings.Contains(logs.String(), `"reason":"invalid_preview_args"`) {
+			t.Errorf("logs missing invalid_preview_args:\n%s", logs.String())
+		}
+	})
+
+	t.Run("empty-arg critical MCP call normalizes to empty object before Propose", func(t *testing.T) {
+		for _, rawArgs := range []json.RawMessage{nil, json.RawMessage(``), json.RawMessage("  \t\n ")} {
+			reg := tools.NewRegistry()
+			setupMCP(t, reg)
+			st := testutil.NewFakeStore()
+			attempt := []model.Attempt{{
+				StartedAt: time.Now(),
+				Latency:   time.Millisecond,
+				Request:   []byte(`{}`),
+				Response:  []byte(`{}`),
+			}}
+			turns := []model.CompletionResponse{
+				{
+					ToolCalls: []model.ToolCall{{
+						ID:        "call_empty",
+						Name:      "todoist__lock_doors",
+						Arguments: rawArgs,
+					}},
+					Attempts: attempt,
+				},
+				{Content: "Awaiting approval.", Attempts: attempt},
+			}
+			var turn int
+			client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+				resp := turns[turn]
+				turn++
+				return resp, nil
+			}}
+			opts := testOptions()
+			opts.Tools = reg
+			opts.Approvals = approval.New(st, reg, time.Hour)
+			a := New(client, st, opts)
+
+			reply := send(t, a, 1, "lock doors")
+			if reply != "Awaiting approval." {
+				t.Errorf("reply = %q", reply)
+			}
+			pending := st.PendingActions(1)
+			if len(pending) != 1 || string(pending[0].ArgsJSON) != "{}" || pending[0].Preview != "tool todoist__lock_doors" {
+				t.Errorf("pending = %+v, want ArgsJSON={} and Preview='tool todoist__lock_doors'", pending)
+			}
+			calls := st.ToolCalls(1)
+			if len(calls) != 1 || string(calls[0].ArgsJSON) != "{}" || calls[0].Status != store.ToolCallStatusProposed {
+				t.Errorf("calls = %+v, want ArgsJSON={} and proposed", calls)
+			}
+		}
+	})
+
+	t.Run("DB error on Propose still aborts turn", func(t *testing.T) {
+		reg := tools.NewRegistry()
+		_ = reg.Register(tools.NewNotifySelfTool(func(context.Context, identity.UserID, string) error { return nil }))
+		st := failingProposeStore{FakeStore: testutil.NewFakeStore(), err: errStoreDown}
+		client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+			return model.CompletionResponse{ToolCalls: []model.ToolCall{{
+				ID:        "call_db_err",
+				Name:      "notify_self",
+				Arguments: json.RawMessage(`{"text":"hello"}`),
+			}}}, nil
+		}}
+		opts := testOptions()
+		opts.Tools = reg
+		opts.Approvals = approval.New(st, reg, time.Hour)
+		a := New(client, st, opts)
+
+		_, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "notify")
+		if !errors.Is(err, errStoreDown) {
+			t.Errorf("err = %v, want %v", err, errStoreDown)
+		}
+	})
+}
