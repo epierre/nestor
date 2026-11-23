@@ -1,7 +1,8 @@
 ## 1. Loading and pinning
 
-- [ ] 1.1 Parse `SKILL.md` front matter and body; parse `skills.yaml`. Test: `skills_test.go` "valid skill parsed", "missing name rejected", "description over cap rejected".
-- [ ] 1.2 Folder hashing and `skills pin` command; skip on mismatch. Test: `skills_test.go` "hash stable across file order", "edited file skipped, others loaded".
+- [x] 1.1 Parse `SKILL.md` front matter and body; parse `skills.yaml`. Test: `skills_test.go` "valid skill parsed", "missing name rejected", "description over cap rejected".
+- [x] 1.2 Folder hashing and `skills pin` command; skip on mismatch. Test: `skills_test.go` "hash stable across file order", "edited file skipped, others loaded".
+- [x] 1.3 Read `SKILLS_CONFIG` and `SKILLS_DIR` in `internal/config`; load skills at startup (invalid `skills.yaml` stops it, mismatched skill is skipped); ship an empty `config/skills.yaml` and `skills/README.md`; mount both read-only in `deploy/docker-compose.yml`; document both variables in `README.md`. Test: `config_test.go` "skills paths read", "skills config without dir rejected"; `cmd/nestor/skillsstart_test.go` "unset config means no skills", "invalid skills.yaml stops startup", "shipped skills.yaml is valid"; `docker compose config` succeeds.
 
 ## 2. Progressive disclosure
 

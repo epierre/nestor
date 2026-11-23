@@ -30,6 +30,28 @@ skills:
 whose files do not match its pinned hash is skipped and logged; the process does not fail, so a
 bad edit to one skill cannot take the assistant down.
 
+## Runtime paths
+
+Two environment variables tell the running process where skills live, in the same way
+`MCP_CONFIG` names `mcp.yaml`:
+
+| Variable | Meaning |
+|---|---|
+| `SKILLS_CONFIG` | Path of the reviewed `skills.yaml`. Unset: no skills are offered and `skills/` is not read. |
+| `SKILLS_DIR` | Folder holding one subfolder per skill. Required when `SKILLS_CONFIG` is set. |
+
+`deploy/docker-compose.yml` mounts `config/skills.yaml` at `/etc/nestor/skills.yaml` and `skills/`
+at `/etc/nestor/skills`, both read-only, and sets the two variables. The container's root
+filesystem is already read-only, so nothing in the agent can edit a skill after it was pinned.
+
+A `skills.yaml` that fails to parse or validate (unknown field, duplicate or invalid name,
+malformed hash, unknown user) stops startup, as an invalid `mcp.yaml` does: it is a reviewed file
+and a mistake in it should be seen at once. A single skill whose folder does not match its pin is
+different: it is skipped and logged, and the process keeps running (see above).
+
+`nestor skills pin <name>` is a review-time command run from the repository root and reads
+`skills/<name>`; it does not use these variables.
+
 ## Progressive disclosure
 
 The system prompt gets a short block per enabled skill for the requesting user:
@@ -71,6 +93,8 @@ the socket.
 
 - Hash mismatch: skill skipped, logged; others unaffected.
 - Script timeout or OOM: tool result describes the failure; run recorded with status error.
+- `skills.yaml` invalid, or `SKILLS_CONFIG` set without `SKILLS_DIR`: startup fails with an error
+  naming the problem.
 - `sandboxd` down: `run_skill_script` returns an error result; instruction-only skills still work.
 - Model asks for a skill not enabled for the user: error result "unknown skill", same as non-existent.
 

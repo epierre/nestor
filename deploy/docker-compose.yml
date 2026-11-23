@@ -29,8 +29,12 @@ services:
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:-}
       ADMIN_USER_ID: ${ADMIN_USER_ID:-}
       MCP_CONFIG: /etc/nestor/mcp.yaml
+      SKILLS_CONFIG: /etc/nestor/skills.yaml
+      SKILLS_DIR: /etc/nestor/skills
     volumes:
       - ../config/mcp.yaml:/etc/nestor/mcp.yaml:ro
+      - ../config/skills.yaml:/etc/nestor/skills.yaml:ro
+      - ../skills:/etc/nestor/skills:ro
     networks:
       - default
       - database

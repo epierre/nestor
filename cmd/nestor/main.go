@@ -43,6 +43,8 @@ func main() {
 		err = runCredentials(context.Background(), os.Args[2:], os.Getenv, os.Stdin, os.Stdout)
 	case len(os.Args) > 1 && os.Args[1] == "mcp":
 		err = runMCP(context.Background(), os.Args[2:], os.Getenv, os.Stdout)
+	case len(os.Args) > 1 && os.Args[1] == "skills":
+		err = skillsCommand(skillsDir, os.Args[2:], os.Stdout)
 	default:
 		err = run()
 	}
@@ -84,6 +86,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("list users: %w", err)
 	}
+	loadedSkills, err := loadSkills(cfg, active, slog.Default())
+	if err != nil {
+		return fmt.Errorf("load skills: %w", err)
+	}
+	slog.Info("skills loaded", "count", len(loadedSkills))
 	// MCP supervisors get their own context, so that whatever ends run, they are stopped before
 	// it returns rather than waited on while still running.
 	mcpCtx, stopMCP := context.WithCancel(ctx)
