@@ -3,4 +3,8 @@
 #   nestor skills pin <name>
 # and paste the printed entry below, adding users (internal IDs or "*"). A skill whose files no
 # longer match its hash is skipped and logged.
-skills: []
+skills:
+  - name: weekly-review
+    hash: sha256:e626196865d7aa608194f6f170dfeca9393d200f7ed07570e5ec0274c87b043e
+    users: ["*"]
+    scripts: false
