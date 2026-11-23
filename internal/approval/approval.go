@@ -257,7 +257,11 @@ func (g *Gate) run(ctx context.Context, user identity.UserID, action store.Pendi
 	if err != nil {
 		return store.PendingAction{}, err
 	}
-	g.completeToolCall(userCtx, user, action.ToolCallID, store.ToolCallStatusExecuted, resultJSON, "", latency)
+	status := store.ToolCallStatusExecuted
+	if res.Truncated {
+		status = store.ToolCallStatusTruncated
+	}
+	g.completeToolCall(userCtx, user, action.ToolCallID, status, resultJSON, "", latency)
 	slog.InfoContext(userCtx, "critical tool executed",
 		"action_id", executed.ID, "tool", action.ToolName, "latency_ms", latency.Milliseconds())
 	g.note(userCtx, user, fmt.Sprintf(noteExecuted, executed.ID))

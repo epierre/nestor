@@ -72,10 +72,11 @@ type ModelCall struct {
 
 // Values of ToolCall.Status.
 const (
-	ToolCallStatusExecuted = "executed"
-	ToolCallStatusRejected = "rejected"
-	ToolCallStatusError    = "error"
-	ToolCallStatusProposed = "proposed"
+	ToolCallStatusExecuted  = "executed"
+	ToolCallStatusRejected  = "rejected"
+	ToolCallStatusError     = "error"
+	ToolCallStatusProposed  = "proposed"
+	ToolCallStatusTruncated = "truncated"
 )
 
 // ToolCall is one row of the tool call log.
@@ -163,6 +164,40 @@ var ErrTaskNotFound = errors.New("task not found")
 // ErrReminderNotFound is returned when a reminder does not exist, belongs to another user, or is
 // no longer pending (delivered or cancelled). These are not told apart.
 var ErrReminderNotFound = errors.New("reminder not found")
+
+// ErrCredentialNotFound is returned when user has no stored credential under that key.
+var ErrCredentialNotFound = errors.New("credential not found")
+
+// ErrToolPinNotFound is returned when approving a tool that has never been seen on connect.
+var ErrToolPinNotFound = errors.New("tool pin not found")
+
+// ToolPinState is what is known about one MCP tool: the version an administrator approved, if
+// any, and the latest version seen on connect. NewlySeen is set when the seen version changed with
+// the call that returned it, so the administrator is told once per version.
+type ToolPinState struct {
+	Approved  *ToolPin
+	Seen      ToolPin
+	NewlySeen bool
+}
+
+// ToolPin is one version of an MCP tool's description and input schema. It is host-wide
+// configuration, not user data. Hash covers both description and schema. ApprovedAt is set only
+// on an approved version.
+type ToolPin struct {
+	Server      string
+	Tool        string
+	Description string
+	SchemaJSON  json.RawMessage
+	Hash        string
+	ApprovedAt  time.Time
+}
+
+// Credential is an encrypted per-user secret as stored. Open it with internal/credentials.
+type Credential struct {
+	Ciphertext []byte
+	Nonce      []byte
+	UpdatedAt  time.Time
+}
 
 // Task is a task the owner keeps. DueDate is a calendar day, YYYY-MM-DD, or empty for none.
 type Task struct {
@@ -259,6 +294,14 @@ type Store interface {
 	// MarkReminderDelivered records that a pending reminder was sent. It reports false when the
 	// reminder was no longer pending.
 	MarkReminderDelivered(ctx context.Context, user identity.UserID, id int64, at time.Time) (bool, error)
+	// SetCredential stores the encrypted credential key for user, replacing any earlier value. The
+	// store never sees plaintext; callers encrypt with internal/credentials first.
+	SetCredential(ctx context.Context, user identity.UserID, key string, ciphertext, nonce []byte) error
+	// ExternalIdentity returns user's active identity on platform, such as a Telegram user ID, or
+	// ErrIdentityNotFound. Only the channel for that platform may use it.
+	ExternalIdentity(ctx context.Context, user identity.UserID, platform string) (string, error)
+	// GetCredential returns user's encrypted credential key, or ErrCredentialNotFound.
+	GetCredential(ctx context.Context, user identity.UserID, key string) (Credential, error)
 }
 
 // RequireUser returns an error unless ctx carries user, so that a call made outside a user's

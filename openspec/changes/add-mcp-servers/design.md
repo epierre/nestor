@@ -19,19 +19,33 @@ servers:
 
   - name: todoist
     transport: http
-    url: http://mcp-todoist-{user}:8080/mcp   # per-user instance
+    url: http://mcp-todoist:8080/mcp        # one shared instance
     image: ghcr.io/example/todoist-mcp:1.4.2
     credentials: per_user
     credential_key: todoist_token
+    credential_delivery: header             # token sent per call, see Credentials
     users: [1]
     tools:
       get_tasks:   { risk: read }
       add_task:    { risk: reversible }
       delete_task: { risk: critical }
+
+  - name: notes                             # third-party server that only reads an env var
+    transport: http
+    url: http://mcp-notes-{user}:8080/mcp   # one instance per user
+    image: ghcr.io/example/notes-mcp:0.9.0
+    credentials: per_user
+    credential_key: notes_token
+    credential_delivery: container
+    users: [1, 2]
+    tools:
+      list_notes: { risk: read }
 ```
 
 Validation at startup (process refuses to start on failure): every listed tool has a risk;
-`per_user` servers name a `credential_key`; `users` refers to existing users; names are unique.
+`per_user` servers name a `credential_key` and a `credential_delivery`; `users` refers to existing
+users; names are unique; `header` delivery requires `remote: false` and a URL without `{user}`;
+`container` delivery requires `{user}` in the URL.
 
 ## Tool naming
 
@@ -60,29 +74,56 @@ list, since a generic server cannot provide a trustworthy preview itself.
 
 ## Credentials
 
-Two options were considered for per-user servers:
+A server with `credentials: per_user` gets a user's token one of two ways, chosen per server by
+`credential_delivery` in `mcp.yaml`.
 
-1. One server instance per user, credential injected as an environment variable at container start.
-2. Shared instance, credential sent per request (HTTP header).
+- **`header`** (servers we run): one shared container. On each call Nestor sends the calling
+  user's token in an `Authorization` header, so the container only ever sees the token of the
+  user making the call. Only allowed when `remote: false`, so a token never leaves the host.
+- **`container`** (third-party servers that only accept an environment variable): one container
+  per (server, user), started with that user's token. Used only where a server cannot take a
+  header. Its token source is an open question (see below).
 
-Option 1 is the default: it is the only one that guarantees a server never holds two users'
-tokens, and most community servers only support env-var configuration. Option 2 is allowed only
-for servers we control. Credentials live in `user_credentials(user_id, key, ciphertext, nonce,
-updated_at)`, encrypted with AES-GCM under `CREDENTIALS_KEY` from the environment.
+In both cases the session used for a call is chosen from the user in the context, never from
+tool arguments. `ForUser(ctx, user)` returns the connection for that user, and a user with no
+stored credential for a server is not offered that server's tools (the missing credential is
+logged without its value).
 
-For option 1, the Compose file contains one service per (server, user). A small generator
-(`cmd/mcpgen`) renders those services from `mcp.yaml`, reading secrets at deploy time from
-Docker secrets rather than writing them into the Compose file.
+Credentials live in `user_credentials(user_id, key, ciphertext, nonce, updated_at)`, encrypted
+with AES-GCM under `CREDENTIALS_KEY` from the environment and bound to the user ID and key. They
+are entered with `nestor credentials set`.
+
+Open question for `container` servers: the container needs the token when it starts. Docker
+secrets (an earlier idea here) would keep a second copy outside the encrypted store. Settle the
+token source before task 3.4 is implemented.
+
+## Reference server and startup
+
+The reference server is first-party: `cmd/mcp-timezone`, read-only, with no credentials and no
+network needs, so it can sit on an `mcp` network with no route anywhere. Nestor reads the
+reviewed `mcp.yaml` from the path in `MCP_CONFIG` (unset: no MCP servers) and runs one supervisor
+per server. Until they are implemented, `stdio` servers, `shared` credentials and `container`
+delivery stop startup instead of being skipped.
 
 ## Description pinning
 
-On first approval of a tool, its description and input schema are hashed and stored in
-`mcp_tool_pins(server, tool, description, schema_json, hash, approved_at)`. At every connect
-the adapter lists the server's tools and compares. A mismatch disables that tool (it disappears
-from model requests), logs an error, and sends the host admin a Telegram message showing the old
-and new description. `nestor mcp approve <server> <tool>` re-pins after review.
+`mcp_tool_pins(server, tool, ...)` keeps two versions of each allowlisted tool: the **approved**
+one (description, input schema, their hash, `approved_at`; empty until the first approval) and
+the latest one **seen** on connect. At every connect the adapter records what it sees:
 
-The model always receives the pinned description, never a live one.
+- Never approved: the tool stays out of model requests. The host admin gets a Telegram message
+  with its description and the approve command.
+- Approved and the seen hash matches: the tool is registered with the approved description and
+  schema.
+- Approved but the seen hash differs: the tool is disabled, an error is logged, and the admin
+  gets a message with the old and new description.
+
+The admin is messaged once per newly seen version, not on every connect.
+`nestor mcp approve <server> <tool>` approves the version last seen. Each health check (every 30s
+by default) re-checks the pins, so an approval takes effect, and a tool that changes while
+connected is disabled, without a reconnect.
+
+The model always receives the approved description and schema, never live ones.
 
 The "host admin" is the internal user ID in `ADMIN_USER_ID` (the owner in v1). Admin is an
 operational role for alerts and CLI commands only; it grants no access to other users' data.
@@ -107,7 +148,9 @@ a read-only filesystem where the image allows.
 
 ## Dependencies
 
-- `github.com/modelcontextprotocol/go-sdk`: official MCP Go SDK (client side).
+- `github.com/modelcontextprotocol/go-sdk` v1.8.0 (released 2026-07-27): official MCP Go SDK (client side). Its own dependencies (`golang-jwt/jwt`, `segmentio/asm`, `x/sys`) come in transitively.
+- `gopkg.in/yaml.v3` v3.0.1: decodes `mcp.yaml`. The standard library has no YAML parser, and
+  v3 supports strict decoding (`KnownFields`) so a misspelled key such as `risks` fails at startup.
 - No new runtime services beyond the MCP server containers themselves.
 
 ## Testing approach

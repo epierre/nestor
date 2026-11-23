@@ -24,11 +24,14 @@ import (
 	"github.com/epierre/nestor/internal/approval"
 	"github.com/epierre/nestor/internal/channel"
 	"github.com/epierre/nestor/internal/identity"
+	"github.com/epierre/nestor/internal/mcp"
+	mcpconfig "github.com/epierre/nestor/internal/mcp/config"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 var _ channel.Handler = (*Agent)(nil)
@@ -1649,5 +1652,198 @@ func TestUnrecordedChatNoticeDeliveredOnNextMessage(t *testing.T) {
 	sendInChat(t, a, 1, 955, "another message")
 	if len(notices.sent) != 1 {
 		t.Errorf("notices = %+v, want sent only once", notices.sent)
+	}
+}
+
+// truncatingTool returns a result that the adapter cut to the server's size cap.
+type truncatingTool struct{}
+
+func (truncatingTool) Name() string                            { return "weather__get_forecast" }
+func (truncatingTool) Description() string                     { return "returns a long result" }
+func (truncatingTool) Schema() json.RawMessage                 { return json.RawMessage(`{"type":"object"}`) }
+func (truncatingTool) Risk() tools.Risk                        { return tools.RiskRead }
+func (truncatingTool) Preview(json.RawMessage) (string, error) { return "", nil }
+func (truncatingTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
+	return tools.Result{Content: "partial\n[truncated: 900 bytes omitted]", Truncated: true}, nil
+}
+
+func TestTruncatedMCPResultRecordedAsTruncated(t *testing.T) {
+	call := model.ToolCall{ID: "call_big", Name: "weather__get_forecast", Arguments: json.RawMessage(`{}`)}
+	turns := []model.CompletionResponse{
+		{ToolCalls: []model.ToolCall{call}},
+		{Content: "Here is the forecast."},
+	}
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		return turns[(len(req.Messages)-2)/2], nil
+	}}
+
+	reg := tools.NewRegistry()
+	if err := reg.Register(truncatingTool{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	opts := testOptions()
+	opts.Tools = reg
+	st := testutil.NewFakeStore()
+	a := New(client, st, opts)
+
+	if reply := send(t, a, 7, "forecast?"); reply != "Here is the forecast." {
+		t.Errorf("got reply %q", reply)
+	}
+	recorded := st.ToolCalls(7)
+	if len(recorded) != 1 {
+		t.Fatalf("recorded %d tool calls for user 7, want 1", len(recorded))
+	}
+	if recorded[0].Status != store.ToolCallStatusTruncated {
+		t.Errorf("recorded status %q, want %q", recorded[0].Status, store.ToolCallStatusTruncated)
+	}
+}
+
+// scopedTool is an MCP-style tool enabled for one user. It counts its executions.
+type scopedTool struct {
+	enabledFor identity.UserID
+	executed   *int
+}
+
+func (scopedTool) Name() string                            { return "weather__get_forecast" }
+func (scopedTool) Description() string                     { return "forecast for one user" }
+func (scopedTool) Schema() json.RawMessage                 { return json.RawMessage(`{"type":"object"}`) }
+func (scopedTool) Risk() tools.Risk                        { return tools.RiskRead }
+func (scopedTool) Preview(json.RawMessage) (string, error) { return "", nil }
+func (s scopedTool) EnabledFor(_ context.Context, user identity.UserID) bool {
+	return user == s.enabledFor
+}
+func (s scopedTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
+	*s.executed++
+	return tools.Result{Content: "sunny"}, nil
+}
+
+func TestServerEnabledForAUserNotOfferedToAnother(t *testing.T) {
+	const forecast = "weather__get_forecast"
+	hasTool := func(list []model.Tool, name string) bool {
+		for _, tool := range list {
+			if tool.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("tool list differs per user", func(t *testing.T) {
+		executed := 0
+		reg := tools.NewRegistry()
+		if err := reg.Register(scopedTool{enabledFor: 1, executed: &executed}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		opts := testOptions()
+		opts.Tools = reg
+
+		client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+			return model.CompletionResponse{Content: "ok"}, nil
+		}}
+		a := New(client, testutil.NewFakeStore(), opts)
+
+		send(t, a, 2, "forecast?")
+		if hasTool(lastRequest(t, client).Tools, forecast) {
+			t.Error("user 2's request offers the server's tool, which is enabled for user 1 only")
+		}
+		send(t, a, 1, "forecast?")
+		if !hasTool(lastRequest(t, client).Tools, forecast) {
+			t.Error("user 1's request does not offer the server's tool")
+		}
+	})
+
+	t.Run("call by a user it is not enabled for is refused", func(t *testing.T) {
+		executed := 0
+		reg := tools.NewRegistry()
+		if err := reg.Register(scopedTool{enabledFor: 1, executed: &executed}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		call := model.ToolCall{ID: "call_forecast", Name: forecast, Arguments: json.RawMessage(`{}`)}
+		turns := []model.CompletionResponse{
+			{ToolCalls: []model.ToolCall{call}},
+			{Content: "I cannot."},
+		}
+		client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+			return turns[(len(req.Messages)-2)/2], nil
+		}}
+		opts := testOptions()
+		opts.Tools = reg
+		st := testutil.NewFakeStore()
+		a := New(client, st, opts)
+
+		send(t, a, 2, "forecast?")
+		if executed != 0 {
+			t.Errorf("tool executed %d times for a user it is not enabled for", executed)
+		}
+		recorded := st.ToolCalls(2)
+		if len(recorded) != 1 || recorded[0].Status != store.ToolCallStatusRejected {
+			t.Errorf("recorded calls for user 2 = %+v, want one rejected call", recorded)
+		}
+	})
+}
+
+// approvingPins approves every MCP tool version on sight. Approval is tested in internal/mcp.
+type approvingPins struct{}
+
+func (approvingPins) RecordToolSeen(_ context.Context, live store.ToolPin) (store.ToolPinState, error) {
+	approved := live
+	return store.ToolPinState{Approved: &approved, Seen: live, NewlySeen: true}, nil
+}
+
+func TestMCPToolCalledThroughTheAgent(t *testing.T) {
+	ctx := context.Background()
+	srv := sdk.NewServer(&sdk.Implementation{Name: "tz", Version: "0"}, nil)
+	srv.AddTool(&sdk.Tool{Name: "get_time", Description: "Current time in a zone.", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "17:05 in Europe/Zurich"}}}, nil
+		})
+	serverT, clientT := sdk.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, serverT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	session, err := mcp.Connect(ctx, clientT)
+	if err != nil {
+		t.Fatalf("mcp.Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	reg := tools.NewRegistry()
+	server := mcpconfig.Server{Name: "timezone", Transport: "http", Credentials: "none", Users: []string{"*"},
+		Tools: map[string]mcpconfig.Tool{"get_time": {Risk: tools.RiskRead}}}
+	if err := (&mcp.Registrar{Registry: reg, Pins: approvingPins{}}).Register(ctx, server, session); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	call := model.ToolCall{ID: "call_tz", Name: "timezone__get_time", Arguments: json.RawMessage(`{}`)}
+	turns := []model.CompletionResponse{
+		{ToolCalls: []model.ToolCall{call}},
+		{Content: "It is 17:05."},
+	}
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		return turns[(len(req.Messages)-2)/2], nil
+	}}
+	opts := testOptions()
+	opts.Tools = reg.AgentView()
+	st := testutil.NewFakeStore()
+	a := New(client, st, opts)
+
+	if reply := send(t, a, 1, "what time is it in Zurich?"); reply != "It is 17:05." {
+		t.Errorf("reply = %q", reply)
+	}
+	first := client.Requests()[0]
+	var offered bool
+	for _, tool := range first.Tools {
+		offered = offered || (tool.Name == "timezone__get_time" && tool.Description == "Current time in a zone.")
+	}
+	if !offered {
+		t.Errorf("MCP tool not offered with its approved description: %+v", first.Tools)
+	}
+	last := lastRequest(t, client).Messages
+	result := last[len(last)-1]
+	if result.Role != model.RoleTool || !strings.HasPrefix(result.Content, "[data]") || !strings.Contains(result.Content, "17:05 in Europe/Zurich") {
+		t.Errorf("tool result message = %+v, want a [data] tool message with the server's answer", result)
+	}
+	if calls := st.ToolCalls(1); len(calls) != 1 || calls[0].Status != store.ToolCallStatusExecuted || calls[0].ToolName != "timezone__get_time" {
+		t.Errorf("recorded tool calls = %+v, want one executed timezone__get_time", calls)
 	}
 }

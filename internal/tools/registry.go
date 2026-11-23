@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
+	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -92,6 +94,40 @@ func (r *Registry) Lookup(name string) (Tool, error) {
 
 // Tools returns the list of registered tools formatted for language model requests,
 // in registration order.
+// Unregister removes the tool registered under name, such as an MCP tool whose server became
+// unavailable. It reports whether there was one.
+func (r *Registry) Unregister(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.tools[name]; !ok {
+		return false
+	}
+	delete(r.tools, name)
+	delete(r.schemas, name)
+	r.order = slices.DeleteFunc(r.order, func(n string) bool { return n == name })
+	return true
+}
+
+// ToolsFor lists the tools that user may use, in registration order.
+func (r *Registry) ToolsFor(ctx context.Context, user identity.UserID) []model.Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]model.Tool, 0, len(r.order))
+	for _, name := range r.order {
+		t := r.tools[name]
+		if !Enabled(ctx, t, user) {
+			continue
+		}
+		out = append(out, model.Tool{
+			Name:        t.Name(),
+			Description: t.Description(),
+			Parameters:  t.Schema(),
+		})
+	}
+	return out
+}
+
 func (r *Registry) Tools() []model.Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -144,8 +180,9 @@ func (r *Registry) AgentView() *AgentView {
 	return &AgentView{reg: r}
 }
 
-func (v *AgentView) Tools() []model.Tool {
-	return v.reg.Tools()
+// ToolsFor lists the tools offered to user in a model request.
+func (v *AgentView) ToolsFor(ctx context.Context, user identity.UserID) []model.Tool {
+	return v.reg.ToolsFor(ctx, user)
 }
 
 func (v *AgentView) Lookup(name string) (Tool, error) {
@@ -165,6 +202,11 @@ func (v *AgentView) Validate(name string, args json.RawMessage) error {
 
 type refusingTool struct {
 	Tool
+}
+
+// EnabledFor keeps the wrapped tool's user scope. The embedded interface would otherwise hide it.
+func (r refusingTool) EnabledFor(ctx context.Context, user identity.UserID) bool {
+	return Enabled(ctx, r.Tool, user)
 }
 
 func (r *refusingTool) Execute(ctx context.Context, args json.RawMessage) (Result, error) {

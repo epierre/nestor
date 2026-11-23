@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/epierre/nestor/internal/credentials"
+	"github.com/epierre/nestor/internal/identity"
 )
 
 const (
@@ -41,6 +44,14 @@ type Config struct {
 	Timezone string
 	// ApprovalTTL is how long a proposed action waits for its user's decision.
 	ApprovalTTL time.Duration
+	// MCPConfigPath is the reviewed mcp.yaml listing MCP servers. Empty: no MCP servers.
+	MCPConfigPath string
+	// AdminUserID is the internal user who receives operational alerts, such as an MCP tool
+	// waiting for approval. Zero when unset; alerts are then only logged.
+	AdminUserID identity.UserID
+	// CredentialsKey is the AES-256 key that encrypts per-user credentials, decoded from
+	// CREDENTIALS_KEY. It is a secret and must not be logged. Nil when unset.
+	CredentialsKey []byte
 	// ApprovalStaleAfter is how long an action may sit approved before it is failed as outcome
 	// unknown.
 	ApprovalStaleAfter time.Duration
@@ -126,6 +137,24 @@ func Load(getenv func(string) string) (Config, error) {
 			errs = append(errs, fmt.Errorf("ALLOWED_TELEGRAM_USERS: %w", err))
 		}
 		cfg.AllowedTelegramUsers = users
+	}
+
+	cfg.MCPConfigPath = get("MCP_CONFIG")
+
+	if raw := get("ADMIN_USER_ID"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			errs = append(errs, errors.New("ADMIN_USER_ID must be a positive internal user ID"))
+		}
+		cfg.AdminUserID = identity.UserID(max(id, 0))
+	}
+
+	if raw := get("CREDENTIALS_KEY"); raw != "" {
+		key, err := credentials.ParseKey(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("CREDENTIALS_KEY: %w", err))
+		}
+		cfg.CredentialsKey = key
 	}
 
 	if err := errors.Join(errs...); err != nil {

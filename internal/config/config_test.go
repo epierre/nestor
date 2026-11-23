@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/base64"
 	"reflect"
 	"strings"
 	"testing"
@@ -314,5 +316,83 @@ func TestLoadTimezone(t *testing.T) {
 				t.Errorf("Timezone = %q, want %q", cfg.Timezone, tt.want)
 			}
 		})
+	}
+}
+
+func TestCredentialsKey(t *testing.T) {
+	key := bytes.Repeat([]byte{9}, 32)
+	encoded := base64.StdEncoding.EncodeToString(key)
+
+	t.Run("optional and unset", func(t *testing.T) {
+		cfg, err := load(validEnv())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.CredentialsKey != nil {
+			t.Errorf("CredentialsKey = %v, want nil", cfg.CredentialsKey)
+		}
+	})
+
+	t.Run("parsed when set", func(t *testing.T) {
+		env := validEnv()
+		env["CREDENTIALS_KEY"] = encoded
+		cfg, err := load(env)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !bytes.Equal(cfg.CredentialsKey, key) {
+			t.Errorf("CredentialsKey not decoded from base64")
+		}
+	})
+
+	t.Run("invalid key rejected without echoing it", func(t *testing.T) {
+		env := validEnv()
+		env["CREDENTIALS_KEY"] = "short-secret-sentinel"
+		_, err := load(env)
+		if err == nil || !strings.Contains(err.Error(), "CREDENTIALS_KEY") {
+			t.Fatalf("Load error = %v, want one naming CREDENTIALS_KEY", err)
+		}
+		if strings.Contains(err.Error(), "short-secret-sentinel") {
+			t.Errorf("error echoes the key value: %v", err)
+		}
+	})
+}
+
+func TestAdminUserID(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    int64
+		wantErr bool
+	}{
+		{"unset", "", 0, false},
+		{"set", "1", 1, false},
+		{"not a number", "owner", 0, true},
+		{"zero", "0", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			env["ADMIN_USER_ID"] = tt.value
+			cfg, err := load(env)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Load error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && int64(cfg.AdminUserID) != tt.want {
+				t.Errorf("AdminUserID = %d, want %d", cfg.AdminUserID, tt.want)
+			}
+		})
+	}
+}
+
+func TestMCPConfigPath(t *testing.T) {
+	env := validEnv()
+	env["MCP_CONFIG"] = "/etc/nestor/mcp.yaml"
+	cfg, err := load(env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MCPConfigPath != "/etc/nestor/mcp.yaml" {
+		t.Errorf("MCPConfigPath = %q", cfg.MCPConfigPath)
 	}
 }

@@ -390,6 +390,10 @@ func (b brokenIdentities) ResolveIdentity(context.Context, string, string) (iden
 	return 0, errors.New("database down")
 }
 
+func (b brokenIdentities) ExternalIdentity(context.Context, identity.UserID, string) (string, error) {
+	return "", errors.New("database down")
+}
+
 func TestUnresolvableSenderIsRetriedNotAnswered(t *testing.T) {
 	api := newBotAPI(t, textUpdate(1, senderID, "hello"))
 	calls := &atomic.Int32{}
@@ -842,5 +846,25 @@ func TestNotifyDeliversToChat(t *testing.T) {
 	}
 	if got := api.sentTexts(); !reflect.DeepEqual(got, []string{"Outcome unknown."}) || api.sent[0].ChatID != chatID {
 		t.Errorf("sent %+v, want the notice in chat %d", api.sent, chatID)
+	}
+}
+
+func TestNotifyUserReachesTheirChat(t *testing.T) {
+	api := newBotAPI(t)
+	c := newChannel(api, knownSender())
+
+	if err := c.NotifyUser(context.Background(), internalID, "New MCP tool waiting for approval."); err != nil {
+		t.Fatalf("NotifyUser: %v", err)
+	}
+	// A private chat's ID is the user's Telegram ID.
+	if len(api.sent) != 1 || api.sent[0].ChatID != senderID || api.sent[0].Text != "New MCP tool waiting for approval." {
+		t.Errorf("sent %+v, want the text in chat %d", api.sent, senderID)
+	}
+
+	if err := c.NotifyUser(context.Background(), identity.UserID(99), "nobody"); !errors.Is(err, store.ErrIdentityNotFound) {
+		t.Errorf("unknown user: err = %v, want ErrIdentityNotFound", err)
+	}
+	if len(api.sent) != 1 {
+		t.Errorf("a message was sent for an unknown user: %+v", api.sent)
 	}
 }

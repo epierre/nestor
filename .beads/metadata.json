@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "nestor",
+  "project_id": "9417db96-35aa-49e9-a0a9-6cf4d82326fa"
+}
