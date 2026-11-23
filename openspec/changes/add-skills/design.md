@@ -39,8 +39,9 @@ Two environment variables tell the running process where skills live, in the sam
 |---|---|
 | `SKILLS_CONFIG` | Path of the reviewed `skills.yaml`. Unset: no skills are offered and `skills/` is not read. |
 | `SKILLS_DIR` | Folder holding one subfolder per skill. Required when `SKILLS_CONFIG` is set. |
+| `SANDBOXD_URL` | Base URL of `sandboxd`, such as `http://sandboxd:8080`. Unset: `run_skill_script` returns an error result and nothing runs; instruction-only skills still work. Must be an `http` URL to an internal host (a Compose service name, localhost or a private address). |
 
-`deploy/docker-compose.yml` mounts `config/skills.yaml` at `/etc/nestor/skills.yaml` and `skills/`
+`deploy/docker-compose.yml` sets `SANDBOXD_URL: http://sandboxd:8080`, mounts `config/skills.yaml` at `/etc/nestor/skills.yaml` and `skills/`
 at `/etc/nestor/skills`, both read-only, and sets the two variables. The container's root
 filesystem is already read-only, so nothing in the agent can edit a skill after it was pinned.
 
@@ -148,7 +149,9 @@ each run then fails with an error result.
 - File over its size limit: skill refused by `skills pin`, skipped and logged at load.
 - `skills.yaml` invalid, or `SKILLS_CONFIG` set without `SKILLS_DIR`: startup fails with an error
   naming the problem.
-- `sandboxd` down: `run_skill_script` returns an error result; instruction-only skills still work.
+- `sandboxd` down or `SANDBOXD_URL` unset: `run_skill_script` returns an error result; instruction-only
+  skills still work.
+- `SANDBOXD_URL` not an `http` URL to an internal host: startup fails with an error naming the variable.
 - Model asks for a skill not enabled for the user: error result "unknown skill", same as non-existent.
 
 ## Dependencies

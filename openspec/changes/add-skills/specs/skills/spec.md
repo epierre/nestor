@@ -74,6 +74,10 @@ The system SHALL run a skill script only if scripts are enabled for that skill, 
 - **WHEN** the model calls `run_skill_script` for a skill with `scripts: false`
 - **THEN** nothing runs and the model receives an error result
 
+#### Scenario: Sandbox not configured
+- **WHEN** Nestor runs without `SANDBOXD_URL` set and the model calls `run_skill_script` for a skill with `scripts: true`
+- **THEN** no request is sent, nothing runs, and the model receives an error result saying scripts are unavailable
+
 #### Scenario: Script tries the network
 - **WHEN** a bundled script attempts an HTTP request to a public host
 - **THEN** the request fails with a network error inside the sandbox, the run is recorded with the script's exit status, and the model receives that output as an untrusted tool message
