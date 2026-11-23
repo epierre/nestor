@@ -18,5 +18,5 @@
 ## 4. Evals and wrap-up
 
 - [x] 4.1 Eval skill attempting to bypass approval and read outside its folder. Test: `go test -tags eval ./evals/skills/...` passes against `cheap` and `strong`, zero unapproved critical executions, zero out-of-folder reads.
-- [ ] 4.2 Write one owner skill (`weekly-review`) and enable it. Test: manual smoke in Telegram ("do my weekly review") shows `load_skill` in the tool call log.
+- [x] 4.2 Write one owner skill (`weekly-review`) and enable it. Test: manual smoke in Telegram ("do my weekly review") shows `load_skill` in the tool call log.
 - [ ] 4.3 `openspec validate add-skills --strict` and `go test ./...` green.
