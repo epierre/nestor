@@ -23,18 +23,21 @@ type File struct {
 
 // Server is one MCP server the assistant may connect to.
 type Server struct {
-	Name          string `yaml:"name"`
-	Transport     string `yaml:"transport"` // "http" or "stdio"
-	URL           string `yaml:"url"`
-	Image         string `yaml:"image"`
-	Remote        bool   `yaml:"remote"` // true = hosted by a third party, so data leaves the host
-	Credentials   string `yaml:"credentials"`
-	CredentialKey string `yaml:"credential_key"`
+	Name             string `yaml:"name"`
+	Transport        string `yaml:"transport"` // "http" or "stdio"
+	URL              string `yaml:"url"`
+	Image            string `yaml:"image"`
+	Remote           bool   `yaml:"remote"` // true = hosted by a third party, so data leaves the host
+	Credentials      string `yaml:"credentials"`
+	CredentialKey    string `yaml:"credential_key"`
+	CredentialEnv    string `yaml:"credential_env"`
+	CredentialHeader string `yaml:"credential_header"`
 	// CredentialDelivery says how a per_user token reaches the server: "header" (one shared
 	// instance, token sent on each call) or "container" (one instance per user).
 	CredentialDelivery string          `yaml:"credential_delivery"`
 	Users              []string        `yaml:"users"` // internal user IDs, or "*" for every user
 	Timeout            time.Duration   `yaml:"timeout"`
+	HealthInterval     time.Duration   `yaml:"health_interval"`
 	MaxResultBytes     int             `yaml:"max_result_bytes"`
 	Tools              map[string]Tool `yaml:"tools"` // the allowlist: only these tools are exposed
 }
@@ -48,8 +51,8 @@ type Tool struct {
 // http://mcp-todoist-{user}:8080/mcp.
 const userPlaceholder = "{user}"
 
-// Validate checks f against the rules in openspec/changes/add-mcp-servers. knownUsers lists the
-// user IDs that exist. Every problem found is reported at once; the error names servers and
+// Validate checks f against the rules in openspec/specs/mcp-integration/spec.md. knownUsers lists
+// the user IDs that exist. Every problem found is reported at once; the error names servers and
 // tools but never a credential value.
 func Validate(f File, knownUsers []identity.UserID) error {
 	var errs []error
@@ -79,17 +82,41 @@ func validateServer(s Server, knownUsers []identity.UserID) []error {
 	}
 
 	switch s.Credentials {
-	case "none", "shared":
+	case "none":
 		if s.CredentialDelivery != "" {
 			fail("sets credential_delivery but does not use per_user credentials")
 		}
+		if s.CredentialEnv != "" {
+			fail("sets credential_env but does not use shared credentials")
+		}
+		if s.CredentialHeader != "" {
+			fail("sets credential_header but does not use shared credentials")
+		}
+	case "shared":
+		if s.CredentialDelivery != "" {
+			fail("sets credential_delivery but does not use per_user credentials")
+		}
+		if s.CredentialKey != "" {
+			fail("sets credential_key but does not use per_user credentials")
+		}
+		errs = append(errs, validateShared(s)...)
 	case "per_user":
+		if s.CredentialEnv != "" {
+			fail("sets credential_env but does not use shared credentials")
+		}
+		if s.CredentialHeader != "" {
+			fail("sets credential_header but does not use shared credentials")
+		}
 		if s.CredentialKey == "" {
 			fail("uses per_user credentials but names no credential_key")
 		}
 		errs = append(errs, validateDelivery(s)...)
 	default:
 		fail("has unknown credentials %q", s.Credentials)
+	}
+
+	if s.HealthInterval < 0 {
+		fail("has negative health_interval %s", s.HealthInterval)
 	}
 
 	for _, name := range sortedKeys(s.Tools) {
@@ -118,6 +145,77 @@ func validateServer(s Server, knownUsers []identity.UserID) []error {
 	}
 
 	return errs
+}
+
+func validateShared(s Server) []error {
+	var errs []error
+	fail := func(format string, args ...any) {
+		errs = append(errs, fmt.Errorf("server %q "+format, append([]any{s.Name}, args...)...))
+	}
+	if s.Transport != "http" {
+		fail("uses shared credentials, which needs transport http")
+	}
+	switch {
+	case s.CredentialEnv == "":
+		fail("uses shared credentials but names no credential_env")
+	case !isValidEnvName(s.CredentialEnv):
+		fail("has invalid credential_env %q", s.CredentialEnv)
+	}
+	if s.CredentialHeader != "" && !isValidHeaderName(s.CredentialHeader) {
+		fail("has invalid credential_header %q", s.CredentialHeader)
+	}
+	if s.Remote && !isHTTPSURL(s.URL) {
+		fail("is remote with shared credentials, which needs an https URL")
+	}
+	return errs
+}
+
+// isValidEnvName reports whether s matches ^[A-Z_][A-Z0-9_]*$.
+func isValidEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isUpper := c >= 'A' && c <= 'Z'
+		isDigit := c >= '0' && c <= '9'
+		if i == 0 && !isUpper && c != '_' {
+			return false
+		}
+		if !isUpper && !isDigit && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidHeaderName reports whether s is a non-empty HTTP field-name token per RFC 9110.
+func isValidHeaderName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isHTTPTokenChar(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHTTPTokenChar(c byte) bool {
+	if (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+		return true
+	}
+	switch c {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
+}
+
+func isHTTPSURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Scheme == "https" && u.Host != ""
 }
 
 // validateDelivery checks how a per_user server receives its token. A header carries the token

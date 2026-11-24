@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -31,7 +32,19 @@ func Connect(ctx context.Context, t sdk.Transport) (*Session, error) {
 
 // DialHTTP connects to a server over streamable HTTP at url.
 func DialHTTP(ctx context.Context, url string) (*Session, error) {
-	return Connect(ctx, &sdk.StreamableClientTransport{Endpoint: url, DisableStandaloneSSE: true})
+	return DialHTTPWithHeader(ctx, url, "", "")
+}
+
+// DialHTTPWithHeader connects to a server over streamable HTTP at url, adding headerName: headerValue
+// to every HTTP request when headerName is non-empty. headerValue is never logged or echoed in errors.
+func DialHTTPWithHeader(ctx context.Context, url, headerName, headerValue string) (*Session, error) {
+	t := &sdk.StreamableClientTransport{Endpoint: url, DisableStandaloneSSE: true}
+	if headerName != "" {
+		t.HTTPClient = &http.Client{
+			Transport: staticHeader{name: headerName, value: headerValue, base: http.DefaultTransport},
+		}
+	}
+	return Connect(ctx, t)
 }
 
 // ListTools returns every tool the server offers, following pagination. Nothing is filtered
@@ -67,4 +80,17 @@ func (s *Session) CallTool(ctx context.Context, name string, args json.RawMessag
 		return nil, fmt.Errorf("call mcp tool %q: %w", name, err)
 	}
 	return res, nil
+}
+
+// staticHeader adds one fixed header to every HTTP request for a shared-credential MCP server.
+type staticHeader struct {
+	name  string
+	value string
+	base  http.RoundTripper
+}
+
+func (h staticHeader) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set(h.name, h.value)
+	return h.base.RoundTrip(r)
 }

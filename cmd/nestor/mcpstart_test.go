@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -70,8 +72,6 @@ func TestStartMCPRefusesUnsupportedServers(t *testing.T) {
 		wantErr string
 	}{
 		{"stdio transport", server("    transport: stdio\n    credentials: none\n"), `server "odd": stdio transport is not supported yet`},
-		{"shared credentials", server("    transport: http\n    url: http://mcp-odd:8080/mcp\n    credentials: shared\n"),
-			`server "odd": shared credentials are not supported yet`},
 		{"container delivery", server("    transport: http\n    url: http://mcp-odd-{user}:8080/mcp\n    credentials: per_user\n    credential_key: odd_token\n    credential_delivery: container\n"),
 			`server "odd": container credential delivery is not supported yet`},
 		{"header delivery without CREDENTIALS_KEY", server("    transport: http\n    url: http://mcp-odd:8080/mcp\n    credentials: per_user\n    credential_key: odd_token\n    credential_delivery: header\n"),
@@ -145,6 +145,101 @@ func TestShippedMCPConfigIsValid(t *testing.T) {
 	}
 	if err := supported(file); err != nil {
 		t.Errorf("config/mcp.yaml uses a server type startup refuses: %v", err)
+	}
+
+	var maps *mcpconfig.Server
+	for i := range file.Servers {
+		if file.Servers[i].Name == "google-maps" {
+			maps = &file.Servers[i]
+			break
+		}
+	}
+	if maps == nil {
+		t.Fatal("config/mcp.yaml missing google-maps server")
+	}
+	if maps.URL != "https://mapstools.googleapis.com/mcp" {
+		t.Errorf("google-maps URL = %q", maps.URL)
+	}
+	if !maps.Remote {
+		t.Error("google-maps Remote = false, want true")
+	}
+	if maps.Credentials != "shared" {
+		t.Errorf("google-maps Credentials = %q, want shared", maps.Credentials)
+	}
+	if maps.CredentialEnv != "GOOGLE_MAPS_API_KEY" {
+		t.Errorf("google-maps CredentialEnv = %q, want GOOGLE_MAPS_API_KEY", maps.CredentialEnv)
+	}
+	if maps.CredentialHeader != "X-Goog-Api-Key" {
+		t.Errorf("google-maps CredentialHeader = %q, want X-Goog-Api-Key", maps.CredentialHeader)
+	}
+	if maps.HealthInterval != 5*time.Minute {
+		t.Errorf("google-maps HealthInterval = %s, want 5m", maps.HealthInterval)
+	}
+	if !mcpconfig.UsersInclude(maps.Users, 1) {
+		t.Errorf("google-maps Users = %v, want wildcard or user 1", maps.Users)
+	}
+	wantTools := []string{"search_places", "lookup_weather", "compute_routes"}
+	if len(maps.Tools) != len(wantTools) {
+		t.Errorf("google-maps has %d tools, want %d", len(maps.Tools), len(wantTools))
+	}
+	for _, name := range wantTools {
+		tool, ok := maps.Tools[name]
+		if !ok {
+			t.Errorf("google-maps missing tool %q", name)
+			continue
+		}
+		if tool.Risk != tools.RiskRead {
+			t.Errorf("google-maps tool %q risk = %q, want read", name, tool.Risk)
+		}
+	}
+}
+
+func TestShippedMCPConfigStartsWithoutGoogleMapsKey(t *testing.T) {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "tz", Version: "0"}, nil)
+	okHandler := func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "17:05"}}}, nil
+	}
+	srv.AddTool(&sdk.Tool{Name: "get_time", Description: "Current time.", InputSchema: map[string]any{"type": "object"}}, okHandler)
+	srv.AddTool(&sdk.Tool{Name: "convert_time", Description: "Convert time.", InputSchema: map[string]any{"type": "object"}}, okHandler)
+	tzTS := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil))
+	t.Cleanup(tzTS.Close)
+
+	d := testDeps(t, "../../config/mcp.yaml")
+	d.Getenv = func(string) string { return "" }
+	d.Dial = func(ctx context.Context, url string) (*mcp.Session, error) {
+		if url == "http://mcp-timezone:8080/mcp" {
+			return mcp.DialHTTP(ctx, tzTS.URL+"/mcp")
+		}
+		t.Errorf("unexpected Dial(%q)", url)
+		return mcp.DialHTTP(ctx, url)
+	}
+	d.DialWithHeader = func(ctx context.Context, url, headerName, headerValue string) (*mcp.Session, error) {
+		t.Errorf("DialWithHeader unexpectedly called for %q with header %q", url, headerName)
+		return mcp.DialHTTPWithHeader(ctx, url, headerName, headerValue)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wait, err := startMCP(ctx, d)
+	if err != nil {
+		t.Fatalf("startMCP: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := d.Registry.Lookup("timezone__get_time"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timezone__get_time never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := d.Registry.Lookup("google-maps__search_places"); err == nil {
+		t.Fatal("google-maps__search_places registered without GOOGLE_MAPS_API_KEY")
 	}
 }
 
@@ -221,5 +316,326 @@ func TestStartMCPHeaderServerListsAsUserWithCredential(t *testing.T) {
 		if h != "Bearer test-token-2" {
 			t.Errorf("server saw Authorization %q, want only user 2's token", h)
 		}
+	}
+}
+
+func TestStartMCPSharedCredentialCustomHeader(t *testing.T) {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "maps", Version: "0"}, nil)
+	srv.AddTool(&sdk.Tool{Name: "search_places", Description: "Search places.", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "zurich"}}}, nil
+		})
+	var mu sync.Mutex
+	var seenAuth, seenKey []string
+	handler := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenAuth = append(seenAuth, r.Header.Get("Authorization"))
+		seenKey = append(seenKey, r.Header.Get("X-Goog-Api-Key"))
+		mu.Unlock()
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(ts.Close)
+
+	d := testDeps(t, writeMCPConfig(t, `servers:
+  - name: google-maps
+    transport: http
+    url: `+ts.URL+`/mcp
+    credentials: shared
+    credential_env: GOOGLE_MAPS_API_KEY
+    credential_header: X-Goog-Api-Key
+    users: ["*"]
+    tools:
+      search_places: { risk: read }
+`))
+	d.Getenv = func(k string) string {
+		if k == "GOOGLE_MAPS_API_KEY" {
+			return "test-maps-key"
+		}
+		return ""
+	}
+	d.DialWithHeader = mcp.DialHTTPWithHeader
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wait, err := startMCP(ctx, d)
+	if err != nil {
+		t.Fatalf("startMCP: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+
+	var tool tools.Tool
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var lookupErr error
+		tool, lookupErr = d.Registry.Lookup("google-maps__search_places")
+		if lookupErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("google-maps__search_places never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	res, err := tool.Execute(identity.WithUser(ctx, 1), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Content != "zurich" {
+		t.Fatalf("Execute content = %q, want zurich", res.Content)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenKey) == 0 {
+		t.Fatal("server saw zero HTTP requests")
+	}
+	for i := range seenKey {
+		if seenAuth[i] != "" {
+			t.Errorf("request %d Authorization = %q, want empty", i, seenAuth[i])
+		}
+		if seenKey[i] != "test-maps-key" {
+			t.Errorf("request %d X-Goog-Api-Key = %q, want test-maps-key", i, seenKey[i])
+		}
+	}
+}
+
+func TestStartMCPSharedCredentialDefaultBearer(t *testing.T) {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "example", Version: "0"}, nil)
+	srv.AddTool(&sdk.Tool{Name: "ping_tool", Description: "Ping.", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "pong"}}}, nil
+		})
+	var mu sync.Mutex
+	var seenAuth []string
+	handler := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenAuth = append(seenAuth, r.Header.Get("Authorization"))
+		mu.Unlock()
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(ts.Close)
+
+	d := testDeps(t, writeMCPConfig(t, `servers:
+  - name: example
+    transport: http
+    url: `+ts.URL+`/mcp
+    credentials: shared
+    credential_env: EXAMPLE_TOKEN
+    users: ["*"]
+    tools:
+      ping_tool: { risk: read }
+`))
+	d.Getenv = func(k string) string {
+		if k == "EXAMPLE_TOKEN" {
+			return "test-bearer-key"
+		}
+		return ""
+	}
+	d.DialWithHeader = mcp.DialHTTPWithHeader
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wait, err := startMCP(ctx, d)
+	if err != nil {
+		t.Fatalf("startMCP: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := d.Registry.Lookup("example__ping_tool"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("example__ping_tool never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenAuth) == 0 {
+		t.Fatal("server saw zero HTTP requests")
+	}
+	for i, auth := range seenAuth {
+		if auth != "Bearer test-bearer-key" {
+			t.Errorf("request %d Authorization = %q, want Bearer test-bearer-key", i, auth)
+		}
+	}
+}
+
+func TestStartMCPSharedCredentialMissingEnvDisablesOnlyThatServer(t *testing.T) {
+	tzSrv := sdk.NewServer(&sdk.Implementation{Name: "tz", Version: "0"}, nil)
+	tzSrv.AddTool(&sdk.Tool{Name: "get_time", Description: "Current time.", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "17:05"}}}, nil
+		})
+	tzTS := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return tzSrv }, nil))
+	t.Cleanup(tzTS.Close)
+
+	var mapsHits int
+	var mu sync.Mutex
+	mapsTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		mapsHits++
+		mu.Unlock()
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	t.Cleanup(mapsTS.Close)
+
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	d := testDeps(t, writeMCPConfig(t, `servers:
+  - name: google-maps
+    transport: http
+    url: `+mapsTS.URL+`/mcp
+    credentials: shared
+    credential_env: GOOGLE_MAPS_API_KEY
+    credential_header: X-Goog-Api-Key
+    users: ["*"]
+    tools:
+      search_places: { risk: read }
+  - name: timezone
+    transport: http
+    url: `+tzTS.URL+`/mcp
+    credentials: none
+    users: ["*"]
+    tools:
+      get_time: { risk: read }
+`))
+	d.Getenv = func(string) string { return "   " }
+	d.DialWithHeader = mcp.DialHTTPWithHeader
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wait, err := startMCP(ctx, d)
+	if err != nil {
+		t.Fatalf("startMCP: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := d.Registry.Lookup("timezone__get_time"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timezone__get_time never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, err := d.Registry.Lookup("google-maps__search_places"); err == nil {
+		t.Fatal("google-maps__search_places registered despite missing env var")
+	}
+	mu.Lock()
+	hits := mapsHits
+	mu.Unlock()
+	if hits != 0 {
+		t.Errorf("maps server received %d requests, want 0", hits)
+	}
+
+	logs := logBuf.String()
+	if !strings.Contains(logs, "google-maps") || !strings.Contains(logs, "GOOGLE_MAPS_API_KEY") {
+		t.Errorf("warning log = %q, want server name and GOOGLE_MAPS_API_KEY", logs)
+	}
+}
+
+type togglePinStore struct {
+	mu       sync.Mutex
+	approved bool
+	seen     bool
+}
+
+func (p *togglePinStore) RecordToolSeen(_ context.Context, live store.ToolPin) (store.ToolPinState, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	first := !p.seen
+	p.seen = true
+	var approved *store.ToolPin
+	if p.approved {
+		cp := live
+		approved = &cp
+	}
+	return store.ToolPinState{Approved: approved, Seen: live, NewlySeen: first}, nil
+}
+
+func (p *togglePinStore) approve() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.approved = true
+}
+
+func (p *togglePinStore) wasSeen() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.seen
+}
+
+func TestStartMCPUsesConfiguredHealthInterval(t *testing.T) {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "tz", Version: "0"}, nil)
+	srv.AddTool(&sdk.Tool{Name: "get_time", Description: "Current time.", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "17:05"}}}, nil
+		})
+	ts := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil))
+	t.Cleanup(ts.Close)
+
+	pins := &togglePinStore{}
+	d := testDeps(t, writeMCPConfig(t, `servers:
+  - name: timezone
+    transport: http
+    url: `+ts.URL+`/mcp
+    credentials: none
+    health_interval: 20ms
+    users: ["*"]
+    tools:
+      get_time: { risk: read }
+`))
+	d.Pins = pins
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wait, err := startMCP(ctx, d)
+	if err != nil {
+		t.Fatalf("startMCP: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !pins.wasSeen() {
+		if time.Now().After(deadline) {
+			t.Fatal("tool was never seen on connect")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := d.Registry.Lookup("timezone__get_time"); err == nil {
+		t.Fatal("tool registered before approval")
+	}
+
+	pins.approve()
+	approveDeadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		if _, err := d.Registry.Lookup("timezone__get_time"); err == nil {
+			break
+		}
+		if time.Now().After(approveDeadline) {
+			t.Fatal("approved tool not picked up within 500ms; health_interval override not applied")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

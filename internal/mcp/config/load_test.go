@@ -97,6 +97,40 @@ func TestLoad(t *testing.T) {
 			input:   strings.Replace(validFile, "users: [1]", "users: [9]", 1),
 			wantErr: `server "todoist" refers to unknown user "9"`,
 		},
+		{
+			name: "shared server with custom header and health interval",
+			input: `servers:
+  - name: google-maps
+    transport: http
+    url: https://mapstools.googleapis.com/mcp
+    remote: true
+    credentials: shared
+    credential_env: GOOGLE_MAPS_API_KEY
+    credential_header: X-Goog-Api-Key
+    users: ["*"]
+    timeout: 15s
+    health_interval: 5m
+    max_result_bytes: 65536
+    tools:
+      search_places: { risk: read }
+`,
+			want: File{Servers: []Server{
+				{
+					Name:             "google-maps",
+					Transport:        "http",
+					URL:              "https://mapstools.googleapis.com/mcp",
+					Remote:           true,
+					Credentials:      "shared",
+					CredentialEnv:    "GOOGLE_MAPS_API_KEY",
+					CredentialHeader: "X-Goog-Api-Key",
+					Users:            []string{"*"},
+					Timeout:          15 * time.Second,
+					HealthInterval:   5 * time.Minute,
+					MaxResultBytes:   65536,
+					Tools:            map[string]Tool{"search_places": {Risk: tools.RiskRead}},
+				},
+			}},
+		},
 	}
 
 	for _, tt := range tests {
