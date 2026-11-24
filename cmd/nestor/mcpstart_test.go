@@ -70,7 +70,7 @@ func TestStartMCPRefusesUnsupportedServers(t *testing.T) {
 		wantErr string
 	}{
 		{"stdio transport", server("    transport: stdio\n    credentials: none\n"), `server "odd": stdio transport is not supported yet`},
-		{"shared credentials", server("    transport: http\n    url: http://mcp-odd:8080/mcp\n    credentials: shared\n"),
+		{"shared credentials", server("    transport: http\n    url: http://mcp-odd:8080/mcp\n    credentials: shared\n    credential_env: ODD_TOKEN\n"),
 			`server "odd": shared credentials are not supported yet`},
 		{"container delivery", server("    transport: http\n    url: http://mcp-odd-{user}:8080/mcp\n    credentials: per_user\n    credential_key: odd_token\n    credential_delivery: container\n"),
 			`server "odd": container credential delivery is not supported yet`},

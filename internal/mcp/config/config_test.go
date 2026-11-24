@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/tools"
@@ -182,6 +183,163 @@ func TestValidate(t *testing.T) {
 			name:    "per-user placeholder with public host",
 			mutate:  func(s *Server) { s.URL = "https://{user}.example.com/mcp" },
 			wantErr: `points to public host`,
+		},
+		{
+			name: "shared valid default bearer",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+			},
+		},
+		{
+			name: "shared valid custom header remote https",
+			mutate: func(s *Server) {
+				s.URL = "https://mapstools.googleapis.com/mcp"
+				s.Remote = true
+				s.Credentials = "shared"
+				s.CredentialEnv = "GOOGLE_MAPS_API_KEY"
+				s.CredentialHeader = "X-Goog-Api-Key"
+			},
+		},
+		{
+			name: "shared without credential_env",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+			},
+			wantErr: `names no credential_env`,
+		},
+		{
+			name: "shared with invalid credential_env hyphen",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "bad-env"
+			},
+			wantErr: `invalid credential_env`,
+		},
+		{
+			name: "shared with invalid credential_env leading digit",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "1KEY"
+			},
+			wantErr: `invalid credential_env`,
+		},
+		{
+			name: "shared with invalid credential_env lowercase",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "lower"
+			},
+			wantErr: `invalid credential_env`,
+		},
+		{
+			name: "shared over stdio",
+			mutate: func(s *Server) {
+				s.Transport = "stdio"
+				s.Credentials = "shared"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+			},
+			wantErr: `needs transport http`,
+		},
+		{
+			name: "shared with credential_key",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+				s.CredentialKey = "some_key"
+			},
+			wantErr: `sets credential_key`,
+		},
+		{
+			name: "shared with credential_delivery",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+				s.CredentialDelivery = "header"
+			},
+			wantErr: `sets credential_delivery`,
+		},
+		{
+			name: "shared with invalid credential_header space",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+				s.CredentialHeader = "Bad Header"
+			},
+			wantErr: `invalid credential_header`,
+		},
+		{
+			name: "shared with invalid credential_header colon",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+				s.CredentialHeader = "X-Bad:Header"
+			},
+			wantErr: `invalid credential_header`,
+		},
+		{
+			name: "shared with invalid credential_header newline",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+				s.CredentialHeader = "X-Bad\nHeader"
+			},
+			wantErr: `invalid credential_header`,
+		},
+		{
+			name: "shared remote with plain http URL",
+			mutate: func(s *Server) {
+				s.URL = "http://maps.example.com/mcp"
+				s.Remote = true
+				s.Credentials = "shared"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+			},
+			wantErr: `needs an https URL`,
+		},
+		{
+			name: "credential_env set on none",
+			mutate: func(s *Server) {
+				s.Credentials = "none"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+			},
+			wantErr: `does not use shared credentials`,
+		},
+		{
+			name: "credential_header set on none",
+			mutate: func(s *Server) {
+				s.Credentials = "none"
+				s.CredentialHeader = "X-Goog-Api-Key"
+			},
+			wantErr: `does not use shared credentials`,
+		},
+		{
+			name: "credential_env set on per_user",
+			mutate: func(s *Server) {
+				s.Credentials = "per_user"
+				s.CredentialKey = "todoist_token"
+				s.CredentialDelivery = "header"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+			},
+			wantErr: `does not use shared credentials`,
+		},
+		{
+			name: "credential_header set on per_user",
+			mutate: func(s *Server) {
+				s.Credentials = "per_user"
+				s.CredentialKey = "todoist_token"
+				s.CredentialDelivery = "header"
+				s.CredentialHeader = "X-Goog-Api-Key"
+			},
+			wantErr: `does not use shared credentials`,
+		},
+		{
+			name:   "positive health_interval",
+			mutate: func(s *Server) { s.HealthInterval = 5 * time.Minute },
+		},
+		{
+			name:    "negative health_interval",
+			mutate:  func(s *Server) { s.HealthInterval = -1 * time.Second },
+			wantErr: `negative health_interval`,
 		},
 	}
 
