@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/epierre/nestor/internal/config"
@@ -24,8 +26,10 @@ type mcpDeps struct {
 	Credentials mcp.CredentialStore
 	Notifier    mcp.UserNotifier
 	// Users are the active users: mcp.yaml may name only these.
-	Users []identity.UserID
-	Dial  func(ctx context.Context, url string) (*mcp.Session, error)
+	Users          []identity.UserID
+	Getenv         func(string) string
+	Dial           func(ctx context.Context, url string) (*mcp.Session, error)
+	DialWithHeader func(ctx context.Context, url, headerName, headerValue string) (*mcp.Session, error)
 }
 
 // startMCP loads the reviewed mcp.yaml and starts one supervisor per server, which registers the
@@ -67,16 +71,42 @@ func startMCP(ctx context.Context, d mcpDeps) (wait func(), err error) {
 		registrar.Alerts = mcp.AdminAlerts{Notifier: d.Notifier, Admin: d.Config.AdminUserID}
 	}
 
+	getenv := d.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	dial := d.Dial
+	if dial == nil {
+		dial = mcp.DialHTTP
+	}
+	dialWithHeader := d.DialWithHeader
+	if dialWithHeader == nil {
+		dialWithHeader = mcp.DialHTTPWithHeader
+	}
+
 	var wg sync.WaitGroup
 	for _, server := range file.Servers {
-		sup := &mcp.Supervisor{Registrar: registrar, Server: server}
-		if server.CredentialDelivery == "header" {
+		sup := &mcp.Supervisor{Registrar: registrar, Server: server, Interval: server.HealthInterval}
+		switch {
+		case server.CredentialDelivery == "header":
 			users := mcp.NewUserConnector(server, d.Credentials, sealer)
 			sup.Users = users
 			sup.Dial = listAsFirstUser(server, d.Users, users)
-		} else {
+		case server.Credentials == "shared":
+			secret := strings.TrimSpace(getenv(server.CredentialEnv))
+			if secret == "" {
+				slog.WarnContext(ctx, "mcp shared credential env var not set; server disabled",
+					"server", server.Name, "credential_env", server.CredentialEnv)
+				continue
+			}
+			headerName, headerValue := sharedAuthHeader(server.CredentialHeader, secret)
 			url := server.URL
-			sup.Dial = func(ctx context.Context) (*mcp.Session, error) { return d.Dial(ctx, url) }
+			sup.Dial = func(ctx context.Context) (*mcp.Session, error) {
+				return dialWithHeader(ctx, url, headerName, headerValue)
+			}
+		default:
+			url := server.URL
+			sup.Dial = func(ctx context.Context) (*mcp.Session, error) { return dial(ctx, url) }
 		}
 		wg.Add(1)
 		go func() {
@@ -87,6 +117,13 @@ func startMCP(ctx context.Context, d mcpDeps) (wait func(), err error) {
 	return wg.Wait, nil
 }
 
+func sharedAuthHeader(customHeader, secret string) (string, string) {
+	if customHeader == "" {
+		return "Authorization", "Bearer " + secret
+	}
+	return customHeader, secret
+}
+
 // supported rejects the kinds of server that startup does not wire yet, so a configured server is
 // never silently skipped.
 func supported(file mcpconfig.File) error {
@@ -94,8 +131,6 @@ func supported(file mcpconfig.File) error {
 		switch {
 		case s.Transport != "http":
 			return fmt.Errorf("server %q: %s transport is not supported yet", s.Name, s.Transport)
-		case s.Credentials == "shared":
-			return fmt.Errorf("server %q: shared credentials are not supported yet", s.Name)
 		case s.CredentialDelivery == "container":
 			return fmt.Errorf("server %q: container credential delivery is not supported yet (task 3.4)", s.Name)
 		}

@@ -108,7 +108,8 @@ func run() error {
 	// it returns rather than waited on while still running.
 	mcpCtx, stopMCP := context.WithCancel(ctx)
 	waitMCP, err := startMCP(mcpCtx, mcpDeps{
-		Config: cfg, Registry: registry, Pins: st, Credentials: st, Notifier: bot, Users: active, Dial: mcp.DialHTTP,
+		Config: cfg, Registry: registry, Pins: st, Credentials: st, Notifier: bot, Users: active,
+		Getenv: os.Getenv, Dial: mcp.DialHTTP, DialWithHeader: mcp.DialHTTPWithHeader,
 	})
 	if err != nil {
 		stopMCP()
