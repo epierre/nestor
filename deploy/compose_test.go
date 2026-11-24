@@ -11,15 +11,16 @@ import (
 
 type compose struct {
 	Services map[string]struct {
-		Networks    []string `yaml:"networks"`
-		ReadOnly    bool     `yaml:"read_only"`
-		User        string   `yaml:"user"`
-		CapDrop     []string `yaml:"cap_drop"`
-		SecurityOpt []string `yaml:"security_opt"`
-		Ports       []any    `yaml:"ports"`
-		Profiles    []string `yaml:"profiles"`
-		NetworkMode string   `yaml:"network_mode"`
-		Volumes     []string `yaml:"volumes"`
+		Environment map[string]string `yaml:"environment"`
+		Networks    []string          `yaml:"networks"`
+		ReadOnly    bool              `yaml:"read_only"`
+		User        string            `yaml:"user"`
+		CapDrop     []string          `yaml:"cap_drop"`
+		SecurityOpt []string          `yaml:"security_opt"`
+		Ports       []any             `yaml:"ports"`
+		Profiles    []string          `yaml:"profiles"`
+		NetworkMode string            `yaml:"network_mode"`
+		Volumes     []string          `yaml:"volumes"`
 	} `yaml:"services"`
 	Networks map[string]struct {
 		Internal bool `yaml:"internal"`
@@ -142,5 +143,32 @@ func TestSandboxdIsolated(t *testing.T) {
 	if !slices.Equal(r.Profiles, []string{"build"}) || r.NetworkMode != "none" || len(r.Networks) != 0 {
 		t.Errorf("skill-runner: profiles %v, network_mode %q, networks %v; want build-only with no network",
 			r.Profiles, r.NetworkMode, r.Networks)
+	}
+}
+
+func TestGoogleMapsKeyScopedToNestor(t *testing.T) {
+	raw, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read compose file: %v", err)
+	}
+	var c compose
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatalf("parse compose file: %v", err)
+	}
+
+	nestor, ok := c.Services["nestor"]
+	if !ok {
+		t.Fatal("missing nestor service")
+	}
+	if got := nestor.Environment["GOOGLE_MAPS_API_KEY"]; got != "${GOOGLE_MAPS_API_KEY:-}" {
+		t.Errorf("nestor GOOGLE_MAPS_API_KEY = %q, want ${GOOGLE_MAPS_API_KEY:-}", got)
+	}
+	for name, s := range c.Services {
+		if name == "nestor" {
+			continue
+		}
+		if _, exists := s.Environment["GOOGLE_MAPS_API_KEY"]; exists {
+			t.Errorf("service %q must not define GOOGLE_MAPS_API_KEY", name)
+		}
 	}
 }

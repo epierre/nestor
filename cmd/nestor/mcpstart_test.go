@@ -146,6 +146,101 @@ func TestShippedMCPConfigIsValid(t *testing.T) {
 	if err := supported(file); err != nil {
 		t.Errorf("config/mcp.yaml uses a server type startup refuses: %v", err)
 	}
+
+	var maps *mcpconfig.Server
+	for i := range file.Servers {
+		if file.Servers[i].Name == "google-maps" {
+			maps = &file.Servers[i]
+			break
+		}
+	}
+	if maps == nil {
+		t.Fatal("config/mcp.yaml missing google-maps server")
+	}
+	if maps.URL != "https://mapstools.googleapis.com/mcp" {
+		t.Errorf("google-maps URL = %q", maps.URL)
+	}
+	if !maps.Remote {
+		t.Error("google-maps Remote = false, want true")
+	}
+	if maps.Credentials != "shared" {
+		t.Errorf("google-maps Credentials = %q, want shared", maps.Credentials)
+	}
+	if maps.CredentialEnv != "GOOGLE_MAPS_API_KEY" {
+		t.Errorf("google-maps CredentialEnv = %q, want GOOGLE_MAPS_API_KEY", maps.CredentialEnv)
+	}
+	if maps.CredentialHeader != "X-Goog-Api-Key" {
+		t.Errorf("google-maps CredentialHeader = %q, want X-Goog-Api-Key", maps.CredentialHeader)
+	}
+	if maps.HealthInterval != 5*time.Minute {
+		t.Errorf("google-maps HealthInterval = %s, want 5m", maps.HealthInterval)
+	}
+	if !mcpconfig.UsersInclude(maps.Users, 1) {
+		t.Errorf("google-maps Users = %v, want wildcard or user 1", maps.Users)
+	}
+	wantTools := []string{"search_places", "lookup_weather", "compute_routes"}
+	if len(maps.Tools) != len(wantTools) {
+		t.Errorf("google-maps has %d tools, want %d", len(maps.Tools), len(wantTools))
+	}
+	for _, name := range wantTools {
+		tool, ok := maps.Tools[name]
+		if !ok {
+			t.Errorf("google-maps missing tool %q", name)
+			continue
+		}
+		if tool.Risk != tools.RiskRead {
+			t.Errorf("google-maps tool %q risk = %q, want read", name, tool.Risk)
+		}
+	}
+}
+
+func TestShippedMCPConfigStartsWithoutGoogleMapsKey(t *testing.T) {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "tz", Version: "0"}, nil)
+	okHandler := func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "17:05"}}}, nil
+	}
+	srv.AddTool(&sdk.Tool{Name: "get_time", Description: "Current time.", InputSchema: map[string]any{"type": "object"}}, okHandler)
+	srv.AddTool(&sdk.Tool{Name: "convert_time", Description: "Convert time.", InputSchema: map[string]any{"type": "object"}}, okHandler)
+	tzTS := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil))
+	t.Cleanup(tzTS.Close)
+
+	d := testDeps(t, "../../config/mcp.yaml")
+	d.Getenv = func(string) string { return "" }
+	d.Dial = func(ctx context.Context, url string) (*mcp.Session, error) {
+		if url == "http://mcp-timezone:8080/mcp" {
+			return mcp.DialHTTP(ctx, tzTS.URL+"/mcp")
+		}
+		t.Errorf("unexpected Dial(%q)", url)
+		return mcp.DialHTTP(ctx, url)
+	}
+	d.DialWithHeader = func(ctx context.Context, url, headerName, headerValue string) (*mcp.Session, error) {
+		t.Errorf("DialWithHeader unexpectedly called for %q with header %q", url, headerName)
+		return mcp.DialHTTPWithHeader(ctx, url, headerName, headerValue)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wait, err := startMCP(ctx, d)
+	if err != nil {
+		t.Fatalf("startMCP: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := d.Registry.Lookup("timezone__get_time"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timezone__get_time never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := d.Registry.Lookup("google-maps__search_places"); err == nil {
+		t.Fatal("google-maps__search_places registered without GOOGLE_MAPS_API_KEY")
+	}
 }
 
 func TestStartMCPHeaderServerListsAsUserWithCredential(t *testing.T) {
