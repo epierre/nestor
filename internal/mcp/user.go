@@ -23,12 +23,13 @@ type CredentialStore interface {
 	GetCredential(ctx context.Context, user identity.UserID, key string) (store.Credential, error)
 }
 
-// UserConnector holds one session per user to a per_user server with header delivery. Each
-// session sends only its own user's token, so no request carries another user's credential.
+// UserConnector holds one session per user to a per_user server with header or oauth2 delivery.
+// Each session sends only its own user's token, so no request carries another user's credential.
 type UserConnector struct {
 	server config.Server
 	creds  CredentialStore
 	sealer *credentials.Sealer
+	oauth  *OAuthConfig
 
 	mu       sync.Mutex
 	sessions map[identity.UserID]userSession
@@ -39,12 +40,25 @@ type userSession struct {
 	nonce   string // nonce of the credential the session was opened with
 }
 
-// NewUserConnector returns a connector for server, reading tokens from creds.
+// NewUserConnector returns a connector for a static-header per_user server, reading tokens from creds.
 func NewUserConnector(server config.Server, creds CredentialStore, sealer *credentials.Sealer) *UserConnector {
 	return &UserConnector{
 		server:   server,
 		creds:    creds,
 		sealer:   sealer,
+		sessions: make(map[identity.UserID]userSession),
+	}
+}
+
+// NewOAuthUserConnector returns a connector for an oauth2 per_user server, decrypting each user's
+// refresh token from creds and refreshing short-lived access tokens transparently.
+func NewOAuthUserConnector(server config.Server, creds CredentialStore, sealer *credentials.Sealer, oauth OAuthConfig) *UserConnector {
+	cp := oauth
+	return &UserConnector{
+		server:   server,
+		creds:    creds,
+		sealer:   sealer,
+		oauth:    &cp,
 		sessions: make(map[identity.UserID]userSession),
 	}
 }
@@ -71,9 +85,19 @@ func (c *UserConnector) ForUser(ctx context.Context, user identity.UserID) (*Ses
 	if err != nil {
 		return nil, fmt.Errorf("credential %s for user %d: %w", c.server.CredentialKey, user, err)
 	}
+	var httpClient *http.Client
+	if c.oauth != nil {
+		oauthCred, err := ParseOAuthCredential(token)
+		if err != nil {
+			return nil, fmt.Errorf("credential %s for user %d: %w", c.server.CredentialKey, user, err)
+		}
+		httpClient = oauthHTTPClient(c.server.Name, *c.oauth, oauthCred.RefreshToken)
+	} else {
+		httpClient = &http.Client{Transport: bearer{token: string(token), base: http.DefaultTransport}}
+	}
 	transport := &sdk.StreamableClientTransport{
 		Endpoint:             c.server.URL,
-		HTTPClient:           &http.Client{Transport: bearer{token: string(token), base: http.DefaultTransport}},
+		HTTPClient:           httpClient,
 		DisableStandaloneSSE: true,
 	}
 	s, err := Connect(ctx, transport)
