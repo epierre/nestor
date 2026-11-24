@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"regexp"
@@ -1092,5 +1093,165 @@ func TestProposeRejectionStructuredLogs(t *testing.T) {
 	}
 	if !sawReject {
 		t.Errorf("missing preview_too_long structured log; raw:\n%s", raw)
+	}
+}
+
+type failingCritTool struct {
+	name string
+	err  error
+}
+
+func (f failingCritTool) Name() string            { return f.name }
+func (f failingCritTool) Description() string     { return "critical failing tool" }
+func (f failingCritTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (f failingCritTool) Risk() tools.Risk        { return tools.RiskCritical }
+func (f failingCritTool) Preview(json.RawMessage) (string, error) {
+	return "Run " + f.name, nil
+}
+func (f failingCritTool) Execute(context.Context, json.RawMessage) (tools.Result, error) {
+	return tools.Result{}, f.err
+}
+
+func TestFailedCriticalToolLogsWithoutToolContent(t *testing.T) {
+	tests := []struct {
+		name          string
+		toolErr       error
+		unregister    bool
+		secret        string
+		wantReason    string
+		wantErrSubstr string
+	}{
+		{
+			name:          "generic execution error",
+			toolErr:       errors.New("top-secret-result"),
+			secret:        "top-secret-result",
+			wantReason:    "execution_error",
+			wantErrSubstr: "top-secret-result",
+		},
+		{
+			name:          "timeout error",
+			toolErr:       fmt.Errorf("top-secret-timeout: %w", context.DeadlineExceeded),
+			secret:        "top-secret-timeout",
+			wantReason:    "timeout",
+			wantErrSubstr: "top-secret-timeout",
+		},
+		{
+			name:          "tool unregistered before approval",
+			unregister:    true,
+			wantReason:    "tool_not_found",
+			wantErrSubstr: tools.ErrNotFound.Error(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := testutil.NewFakeStore()
+			reg := tools.NewRegistry()
+			tool := failingCritTool{name: "crit_fail", err: tt.toolErr}
+			if err := reg.Register(tool); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			gate := New(st, reg, testTTL)
+			ctx := obs.WithRequestID(identity.WithUser(context.Background(), testUser), "req-fail-1")
+
+			conv, err := st.ActiveConversation(ctx, testUser)
+			if err != nil {
+				t.Fatalf("ActiveConversation: %v", err)
+			}
+			tcID, err := st.RecordToolCall(ctx, testUser, store.ToolCall{
+				ConversationID: conv.ID,
+				ToolName:       "crit_fail",
+				ArgsJSON:       json.RawMessage(`{}`),
+				Risk:           tools.RiskCritical,
+				Status:         store.ToolCallStatusProposed,
+				StartedAt:      time.Now(),
+			})
+			if err != nil {
+				t.Fatalf("RecordToolCall: %v", err)
+			}
+			action, err := gate.Propose(ctx, testUser, tool, json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatalf("Propose: %v", err)
+			}
+			if err := st.LinkActionToolCall(ctx, testUser, action.ID, tcID); err != nil {
+				t.Fatalf("LinkActionToolCall: %v", err)
+			}
+			if tt.unregister {
+				reg.Unregister("crit_fail")
+			}
+
+			var logs bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&logs, nil))))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			decided, decideErr := gate.Decide(ctx, testUser, action.ID, Approve)
+			if decideErr == nil {
+				t.Fatal("Decide error = nil, want failure")
+			}
+			if decided.State != store.PendingFailed {
+				t.Errorf("decided state = %q, want %q", decided.State, store.PendingFailed)
+			}
+
+			raw := logs.String()
+			if tt.secret != "" && strings.Contains(raw, tt.secret) {
+				t.Fatalf("logs leaked untrusted error content %q:\n%s", tt.secret, raw)
+			}
+
+			var sawFailed bool
+			for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+				if line == "" {
+					continue
+				}
+				var entry map[string]any
+				if err := json.Unmarshal([]byte(line), &entry); err != nil {
+					t.Fatalf("decode log line %q: %v", line, err)
+				}
+				if entry["msg"] != "critical tool failed" {
+					continue
+				}
+				sawFailed = true
+				if entry["request_id"] != "req-fail-1" {
+					t.Errorf("request_id = %v, want req-fail-1", entry["request_id"])
+				}
+				if entry["user_id"] != float64(testUser) {
+					t.Errorf("user_id = %v, want %v", entry["user_id"], float64(testUser))
+				}
+				if entry["action_id"] != action.ID {
+					t.Errorf("action_id = %v, want %s", entry["action_id"], action.ID)
+				}
+				if entry["tool"] != "crit_fail" {
+					t.Errorf("tool = %v, want crit_fail", entry["tool"])
+				}
+				if entry["reason"] != tt.wantReason {
+					t.Errorf("reason = %v, want %s", entry["reason"], tt.wantReason)
+				}
+				if _, ok := entry["latency_ms"].(float64); !ok {
+					t.Errorf("latency_ms missing or non-numeric: %v", entry["latency_ms"])
+				}
+				if _, hasErr := entry["error"]; hasErr {
+					t.Errorf("unexpected error attribute in log entry: %v", entry)
+				}
+			}
+			if !sawFailed {
+				t.Fatalf("missing critical tool failed log line; raw:\n%s", raw)
+			}
+
+			stored, err := st.GetPendingAction(ctx, testUser, action.ID)
+			if err != nil {
+				t.Fatalf("GetPendingAction: %v", err)
+			}
+			if stored.State != store.PendingFailed || !strings.Contains(stored.Error, tt.wantErrSubstr) {
+				t.Errorf("stored pending action = %+v, want failed with error containing %q", stored, tt.wantErrSubstr)
+			}
+
+			calls := st.ToolCalls(testUser)
+			if len(calls) != 1 {
+				t.Fatalf("got %d tool calls, want 1", len(calls))
+			}
+			if calls[0].Status != store.ToolCallStatusError || !strings.Contains(calls[0].Error, tt.wantErrSubstr) {
+				t.Errorf("tool call = %+v, want error status with error containing %q", calls[0], tt.wantErrSubstr)
+			}
+		})
 	}
 }

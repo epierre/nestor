@@ -312,16 +312,16 @@ func (g *Gate) run(ctx context.Context, user identity.UserID, action store.Pendi
 	start := time.Now()
 	tool, err := g.tools.Lookup(action.ToolName)
 	if err != nil {
-		return g.fail(userCtx, user, action, time.Since(start), fmt.Errorf("look up %s: %w", action.ToolName, err))
+		return g.fail(userCtx, user, action, time.Since(start), "lookup", fmt.Errorf("look up %s: %w", action.ToolName, err))
 	}
 	res, err := tool.Execute(userCtx, action.ArgsJSON)
 	latency := time.Since(start)
 	if err != nil {
-		return g.fail(userCtx, user, action, latency, fmt.Errorf("execute %s: %w", action.ToolName, err))
+		return g.fail(userCtx, user, action, latency, "execute", fmt.Errorf("execute %s: %w", action.ToolName, err))
 	}
 	resultJSON, err := json.Marshal(res.Content)
 	if err != nil {
-		return g.fail(userCtx, user, action, latency, fmt.Errorf("encode result of %s: %w", action.ToolName, err))
+		return g.fail(userCtx, user, action, latency, "encode_result", fmt.Errorf("encode result of %s: %w", action.ToolName, err))
 	}
 	done := g.instant()
 	executed, err := g.move(userCtx, user, action.ID, store.PendingApproved, store.PendingUpdate{
@@ -344,7 +344,7 @@ func (g *Gate) run(ctx context.Context, user identity.UserID, action store.Pendi
 }
 
 // fail marks an approved action failed and returns the cause as the error.
-func (g *Gate) fail(ctx context.Context, user identity.UserID, action store.PendingAction, latency time.Duration, cause error) (store.PendingAction, error) {
+func (g *Gate) fail(ctx context.Context, user identity.UserID, action store.PendingAction, latency time.Duration, stage string, cause error) (store.PendingAction, error) {
 	done := g.instant()
 	failed, err := g.move(ctx, user, action.ID, store.PendingApproved, store.PendingUpdate{
 		State:      store.PendingFailed,
@@ -356,9 +356,35 @@ func (g *Gate) fail(ctx context.Context, user identity.UserID, action store.Pend
 	}
 	g.completeToolCall(ctx, user, action.ToolCallID, store.ToolCallStatusError, nil, cause.Error(), latency)
 	slog.WarnContext(ctx, "critical tool failed",
-		"action_id", failed.ID, "tool", action.ToolName, "error", cause)
+		"action_id", failed.ID, "tool", action.ToolName, "latency_ms", latency.Milliseconds(),
+		"reason", classifyFailure(stage, cause))
 	g.note(ctx, user, fmt.Sprintf(noteFailed, failed.ID))
 	return failed, cause
+}
+
+// classifyFailure maps a critical tool failure to a content-free reason for structured logs so
+// untrusted tool error text is never emitted to application logs.
+func classifyFailure(stage string, cause error) string {
+	switch stage {
+	case "lookup":
+		if errors.Is(cause, tools.ErrNotFound) {
+			return "tool_not_found"
+		}
+		return "lookup_error"
+	case "encode_result":
+		return "encode_error"
+	default:
+		switch {
+		case errors.Is(cause, context.DeadlineExceeded):
+			return "timeout"
+		case errors.Is(cause, context.Canceled):
+			return "canceled"
+		case errors.Is(cause, tools.ErrValidation):
+			return "validation_error"
+		default:
+			return "execution_error"
+		}
+	}
 }
 
 func (g *Gate) completeToolCall(ctx context.Context, user identity.UserID, toolCallID *int64, status string, resultJSON json.RawMessage, errText string, latency time.Duration) {
