@@ -639,3 +639,231 @@ func TestStartMCPUsesConfiguredHealthInterval(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestStartMCPOAuth2RegistersAndRefreshes(t *testing.T) {
+	const (
+		clientID     = "oauth-client-id"
+		clientSecret = "oauth-client-secret-sentinel"
+		refreshTok   = "refresh-tok-sentinel"
+	)
+
+	tokenTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad form", http.StatusBadRequest)
+			return
+		}
+		if r.FormValue("refresh_token") != refreshTok {
+			http.Error(w, "bad refresh", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"fresh-access-tok","token_type":"Bearer","expires_in":3600}`))
+	}))
+	t.Cleanup(tokenTS.Close)
+
+	srv := sdk.NewServer(&sdk.Implementation{Name: "cal", Version: "0"}, nil)
+	srv.AddTool(&sdk.Tool{Name: "list_events", Description: "List events.", InputSchema: map[string]any{"type": "object"}},
+		func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			auth := ""
+			if req.Extra != nil && req.Extra.Header != nil {
+				auth = req.Extra.Header.Get("Authorization")
+			}
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: auth}}}, nil
+		})
+	mcpTS := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil))
+	t.Cleanup(mcpTS.Close)
+
+	key := bytes.Repeat([]byte{3}, credentials.KeySize)
+	sealer, err := credentials.NewSealer(key)
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	payload, err := mcp.MarshalOAuthCredential(refreshTok)
+	if err != nil {
+		t.Fatalf("MarshalOAuthCredential: %v", err)
+	}
+	ct, nonce, err := sealer.Seal(1, "google_oauth", payload)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	st := testutil.NewFakeStore()
+	if err := st.SetCredential(identity.WithUser(context.Background(), 1), 1, "google_oauth", ct, nonce); err != nil {
+		t.Fatalf("SetCredential: %v", err)
+	}
+
+	d := testDeps(t, writeMCPConfig(t, `servers:
+  - name: google-calendar
+    transport: http
+    url: `+mcpTS.URL+`/mcp
+    credentials: per_user
+    credential_key: google_oauth
+    credential_delivery: oauth2
+    oauth_token_url: `+tokenTS.URL+`
+    oauth_client_id_env: GOOGLE_OAUTH_CLIENT_ID
+    oauth_client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
+    users: ["*"]
+    tools:
+      list_events: { risk: read }
+`))
+	d.Config.CredentialsKey = key
+	d.Credentials = st
+	d.Getenv = func(name string) string {
+		switch name {
+		case "GOOGLE_OAUTH_CLIENT_ID":
+			return clientID
+		case "GOOGLE_OAUTH_CLIENT_SECRET":
+			return clientSecret
+		default:
+			return ""
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wait, err := startMCP(ctx, d)
+	if err != nil {
+		t.Fatalf("startMCP: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+
+	var tool tools.Tool
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var lookupErr error
+		tool, lookupErr = d.Registry.Lookup("google-calendar__list_events")
+		if lookupErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("google-calendar__list_events never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	res, err := tool.Execute(identity.WithUser(ctx, 1), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Content != "Bearer fresh-access-tok" {
+		t.Errorf("Execute content = %q, want Bearer fresh-access-tok", res.Content)
+	}
+}
+
+func TestStartMCPOAuth2MissingClientEnvDisablesOnlyOAuthServers(t *testing.T) {
+	tzSrv := sdk.NewServer(&sdk.Implementation{Name: "tz", Version: "0"}, nil)
+	tzSrv.AddTool(&sdk.Tool{Name: "get_time", Description: "Current time.", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "17:05"}}}, nil
+		})
+	tzTS := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return tzSrv }, nil))
+	t.Cleanup(tzTS.Close)
+
+	var oauthHits int
+	var mu sync.Mutex
+	oauthTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		oauthHits++
+		mu.Unlock()
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	t.Cleanup(oauthTS.Close)
+
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	d := testDeps(t, writeMCPConfig(t, `servers:
+  - name: google-calendar
+    transport: http
+    url: `+oauthTS.URL+`/mcp
+    credentials: per_user
+    credential_key: google_oauth
+    credential_delivery: oauth2
+    oauth_token_url: `+oauthTS.URL+`/token
+    oauth_client_id_env: GOOGLE_OAUTH_CLIENT_ID
+    oauth_client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
+    users: ["*"]
+    tools:
+      list_events: { risk: read }
+  - name: timezone
+    transport: http
+    url: `+tzTS.URL+`/mcp
+    credentials: none
+    users: ["*"]
+    tools:
+      get_time: { risk: read }
+`))
+	// CredentialsKey is intentionally nil and OAuth env vars are empty.
+	d.Getenv = func(string) string { return "" }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wait, err := startMCP(ctx, d)
+	if err != nil {
+		t.Fatalf("startMCP: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := d.Registry.Lookup("timezone__get_time"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timezone__get_time never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, err := d.Registry.Lookup("google-calendar__list_events"); err == nil {
+		t.Fatal("google-calendar__list_events registered despite missing OAuth env vars")
+	}
+	mu.Lock()
+	hits := oauthHits
+	mu.Unlock()
+	if hits != 0 {
+		t.Errorf("oauth server received %d requests, want 0", hits)
+	}
+
+	logs := logBuf.String()
+	if !strings.Contains(logs, "google-calendar") || !strings.Contains(logs, "GOOGLE_OAUTH_CLIENT_ID") || !strings.Contains(logs, "GOOGLE_OAUTH_CLIENT_SECRET") {
+		t.Errorf("warning log = %q, want server name and missing env var names", logs)
+	}
+}
+
+func TestStartMCPOAuth2WithEnvRequiresCredentialsKey(t *testing.T) {
+	d := testDeps(t, writeMCPConfig(t, `servers:
+  - name: google-calendar
+    transport: http
+    url: https://calendarmcp.googleapis.com/mcp/v1
+    remote: true
+    credentials: per_user
+    credential_key: google_oauth
+    credential_delivery: oauth2
+    oauth_token_url: https://oauth2.googleapis.com/token
+    oauth_client_id_env: GOOGLE_OAUTH_CLIENT_ID
+    oauth_client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
+    users: ["*"]
+    tools:
+      list_events: { risk: read }
+`))
+	d.Getenv = func(name string) string {
+		switch name {
+		case "GOOGLE_OAUTH_CLIENT_ID":
+			return "id"
+		case "GOOGLE_OAUTH_CLIENT_SECRET":
+			return "secret"
+		default:
+			return ""
+		}
+	}
+	_, err := startMCP(context.Background(), d)
+	if err == nil || !strings.Contains(err.Error(), "CREDENTIALS_KEY") {
+		t.Fatalf("startMCP error = %v, want CREDENTIALS_KEY error", err)
+	}
+}

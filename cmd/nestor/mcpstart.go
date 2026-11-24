@@ -54,9 +54,19 @@ func startMCP(ctx context.Context, d mcpDeps) (wait func(), err error) {
 		return noop, err
 	}
 
+	getenv := d.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+
 	var sealer *credentials.Sealer
 	for _, s := range file.Servers {
-		if s.CredentialDelivery == "header" && sealer == nil {
+		needsSealer := s.CredentialDelivery == "header"
+		if s.CredentialDelivery == "oauth2" {
+			_, _, missing := oauthClientCreds(s, getenv)
+			needsSealer = len(missing) == 0
+		}
+		if needsSealer && sealer == nil {
 			if d.Config.CredentialsKey == nil {
 				return noop, fmt.Errorf("server %q needs per-user credentials, but CREDENTIALS_KEY is not set", s.Name)
 			}
@@ -71,10 +81,6 @@ func startMCP(ctx context.Context, d mcpDeps) (wait func(), err error) {
 		registrar.Alerts = mcp.AdminAlerts{Notifier: d.Notifier, Admin: d.Config.AdminUserID}
 	}
 
-	getenv := d.Getenv
-	if getenv == nil {
-		getenv = os.Getenv
-	}
 	dial := d.Dial
 	if dial == nil {
 		dial = mcp.DialHTTP
@@ -90,6 +96,20 @@ func startMCP(ctx context.Context, d mcpDeps) (wait func(), err error) {
 		switch {
 		case server.CredentialDelivery == "header":
 			users := mcp.NewUserConnector(server, d.Credentials, sealer)
+			sup.Users = users
+			sup.Dial = listAsFirstUser(server, d.Users, users)
+		case server.CredentialDelivery == "oauth2":
+			id, secret, missing := oauthClientCreds(server, getenv)
+			if len(missing) > 0 {
+				slog.WarnContext(ctx, "mcp oauth2 client env var not set; server disabled",
+					"server", server.Name, "missing_env", strings.Join(missing, ","))
+				continue
+			}
+			users := mcp.NewOAuthUserConnector(server, d.Credentials, sealer, mcp.OAuthConfig{
+				ClientID:     id,
+				ClientSecret: secret,
+				TokenURL:     server.OAuthTokenURL,
+			})
 			sup.Users = users
 			sup.Dial = listAsFirstUser(server, d.Users, users)
 		case server.Credentials == "shared":
@@ -122,6 +142,18 @@ func sharedAuthHeader(customHeader, secret string) (string, string) {
 		return "Authorization", "Bearer " + secret
 	}
 	return customHeader, secret
+}
+
+func oauthClientCreds(s mcpconfig.Server, getenv func(string) string) (id, secret string, missing []string) {
+	id = strings.TrimSpace(getenv(s.OAuthClientIDEnv))
+	secret = strings.TrimSpace(getenv(s.OAuthClientSecretEnv))
+	if id == "" {
+		missing = append(missing, s.OAuthClientIDEnv)
+	}
+	if secret == "" {
+		missing = append(missing, s.OAuthClientSecretEnv)
+	}
+	return id, secret, missing
 }
 
 // supported rejects the kinds of server that startup does not wire yet, so a configured server is
