@@ -24,9 +24,10 @@ context: |
     Proton account) and Gmail (IMAP/SMTP with XOAUTH2 using the user's Google OAuth token). Both
     go through a single IMAP/SMTP adapter with pluggable authentication; a Gmail API adapter is
     added only if IMAP proves insufficient.
-  - Calendar (planned, `add-calendar`): Google Calendar API over OAuth 2.0. One Google OAuth app
-    for the host; each user's refresh token stored per user, encrypted. Gmail users grant mail
-    and calendar scopes in the same consent.
+  - Calendar (via Google Calendar MCP in `add-google-workspace-mcp`, replacing native `add-calendar`):
+    Google's official remote Workspace MCP servers (Calendar, Contacts, Docs, Drive, Search) over
+    OAuth 2.0. One Google OAuth app for the host; each user's refresh token stored per user,
+    encrypted. Gmail users in `add-email` can reuse the same OAuth app and onboarding flow.
   - Storage: PostgreSQL (with pgvector available for later memory work).
   - Tools are exposed to the agent through a Go tool registry; external tools (planned,
     `add-mcp-servers`) may be MCP servers (official MCP Go SDK). Every tool declares a risk level.

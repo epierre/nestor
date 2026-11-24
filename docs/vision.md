@@ -79,12 +79,12 @@ Control and trust
 2. `add-tool-approval-gate` (done, with `add-stale-approval-notices` and `refine-context-and-approvals`): tool registry with risk levels, pending actions, approve/reject cards, conversational edits, and stale-approval notices.
 3. `add-tasks-and-reminders` (done): first real tools (tasks, reminders) plus the scheduler.
 4. `add-model-routing` (planned): model tiers, fallbacks, cost tracking and budget alerts.
-5. `add-calendar` (planned): read calendar, propose event changes through the approval gate.
+5. `add-google-workspace-mcp` (replaces planned native `add-calendar`): Google Calendar, Contacts, Docs, Drive, and Universal Search via official remote MCP servers with per-user OAuth 2.0 refresh tokens and approval-gated write tools.
 6. `add-email` (planned): read and summarise mail, draft replies, send via approval.
 7. `add-owner-memory` (planned): profile facts, episodic recall, review/correct/forget commands.
 8. `add-proactive-briefings` (planned): morning summary and important-mail alerts.
-9. `add-mcp-servers` (specified): third-party MCP tools with configured risk levels, per-user enablement and credentials, pinned descriptions.
-10. `add-skills` (specified): reviewed, pinned skills loaded on demand, optional sandboxed scripts.
+9. `add-mcp-servers` (done, extended by `add-google-maps-mcp` and `add-google-workspace-mcp`): third-party and remote MCP tools with configured risk levels, per-user enablement and credentials, pinned descriptions.
+10. `add-skills` (done): reviewed, pinned skills loaded on demand, optional sandboxed scripts.
 11. (Later, optional) `add-household-users` (planned): onboarding further users, per-user budgets.
 
 Changes 9 and 10 depend only on change 2 and can be pulled earlier whenever useful.

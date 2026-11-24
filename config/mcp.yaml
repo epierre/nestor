@@ -31,3 +31,103 @@ servers:
       search_places:  { risk: read }
       lookup_weather: { risk: read }
       compute_routes: { risk: read }
+
+  - name: google-contacts
+    transport: http
+    url: https://people.googleapis.com/mcp/v1
+    remote: true
+    credentials: per_user
+    credential_key: google_oauth
+    credential_delivery: oauth2
+    oauth_token_url: https://oauth2.googleapis.com/token
+    oauth_client_id_env: GOOGLE_OAUTH_CLIENT_ID
+    oauth_client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
+    users: ["*"]
+    timeout: 15s
+    health_interval: 5m
+    max_result_bytes: 65536
+    tools:
+      search_contacts:  { risk: read }
+      get_user_profile: { risk: read }
+
+  - name: google-calendar
+    transport: http
+    url: https://calendarmcp.googleapis.com/mcp/v1
+    remote: true
+    credentials: per_user
+    credential_key: google_oauth
+    credential_delivery: oauth2
+    oauth_token_url: https://oauth2.googleapis.com/token
+    oauth_client_id_env: GOOGLE_OAUTH_CLIENT_ID
+    oauth_client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
+    users: ["*"]
+    timeout: 15s
+    health_interval: 5m
+    max_result_bytes: 65536
+    tools:
+      list_calendars:   { risk: read }
+      list_events:      { risk: read }
+      get_event:        { risk: read }
+      suggest_time:     { risk: read }
+      create_event:     { risk: critical }
+      update_event:     { risk: critical }
+      delete_event:     { risk: critical }
+      respond_to_event: { risk: critical }
+
+  - name: google-docs
+    transport: http
+    url: https://docsmcp.googleapis.com/mcp/v1
+    remote: true
+    credentials: per_user
+    credential_key: google_oauth
+    credential_delivery: oauth2
+    oauth_token_url: https://oauth2.googleapis.com/token
+    oauth_client_id_env: GOOGLE_OAUTH_CLIENT_ID
+    oauth_client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
+    users: ["*"]
+    timeout: 15s
+    health_interval: 5m
+    max_result_bytes: 65536
+    tools:
+      read_doc:   { risk: read }
+      update_doc: { risk: critical }
+
+  - name: google-drive
+    transport: http
+    url: https://drivemcp.googleapis.com/mcp/v1
+    remote: true
+    credentials: per_user
+    credential_key: google_oauth
+    credential_delivery: oauth2
+    oauth_token_url: https://oauth2.googleapis.com/token
+    oauth_client_id_env: GOOGLE_OAUTH_CLIENT_ID
+    oauth_client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
+    users: ["*"]
+    timeout: 15s
+    health_interval: 5m
+    max_result_bytes: 65536
+    tools:
+      search_files:         { risk: read }
+      read_file_content:    { risk: read }
+      list_recent_files:    { risk: read }
+      get_file_metadata:    { risk: read }
+      get_file_permissions: { risk: read }
+      create_file:          { risk: critical }
+      copy_file:            { risk: critical }
+
+  - name: google-workspace-search
+    transport: http
+    url: https://workspacemcp.googleapis.com/mcp/v1
+    remote: true
+    credentials: per_user
+    credential_key: google_oauth
+    credential_delivery: oauth2
+    oauth_token_url: https://oauth2.googleapis.com/token
+    oauth_client_id_env: GOOGLE_OAUTH_CLIENT_ID
+    oauth_client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
+    users: ["*"]
+    timeout: 15s
+    health_interval: 5m
+    max_result_bytes: 65536
+    tools:
+      search_corpus: { risk: read }

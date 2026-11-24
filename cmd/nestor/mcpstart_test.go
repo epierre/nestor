@@ -192,6 +192,107 @@ func TestShippedMCPConfigIsValid(t *testing.T) {
 			t.Errorf("google-maps tool %q risk = %q, want read", name, tool.Risk)
 		}
 	}
+
+	byName := make(map[string]mcpconfig.Server, len(file.Servers))
+	for _, s := range file.Servers {
+		byName[s.Name] = s
+	}
+	wantWorkspace := []struct {
+		name  string
+		url   string
+		tools map[string]tools.Risk
+	}{
+		{
+			name: "google-contacts",
+			url:  "https://people.googleapis.com/mcp/v1",
+			tools: map[string]tools.Risk{
+				"search_contacts":  tools.RiskRead,
+				"get_user_profile": tools.RiskRead,
+			},
+		},
+		{
+			name: "google-calendar",
+			url:  "https://calendarmcp.googleapis.com/mcp/v1",
+			tools: map[string]tools.Risk{
+				"list_calendars":   tools.RiskRead,
+				"list_events":      tools.RiskRead,
+				"get_event":        tools.RiskRead,
+				"suggest_time":     tools.RiskRead,
+				"create_event":     tools.RiskCritical,
+				"update_event":     tools.RiskCritical,
+				"delete_event":     tools.RiskCritical,
+				"respond_to_event": tools.RiskCritical,
+			},
+		},
+		{
+			name: "google-docs",
+			url:  "https://docsmcp.googleapis.com/mcp/v1",
+			tools: map[string]tools.Risk{
+				"read_doc":   tools.RiskRead,
+				"update_doc": tools.RiskCritical,
+			},
+		},
+		{
+			name: "google-drive",
+			url:  "https://drivemcp.googleapis.com/mcp/v1",
+			tools: map[string]tools.Risk{
+				"search_files":         tools.RiskRead,
+				"read_file_content":    tools.RiskRead,
+				"list_recent_files":    tools.RiskRead,
+				"get_file_metadata":    tools.RiskRead,
+				"get_file_permissions": tools.RiskRead,
+				"create_file":          tools.RiskCritical,
+				"copy_file":            tools.RiskCritical,
+			},
+		},
+		{
+			name: "google-workspace-search",
+			url:  "https://workspacemcp.googleapis.com/mcp/v1",
+			tools: map[string]tools.Risk{
+				"search_corpus": tools.RiskRead,
+			},
+		},
+	}
+
+	for _, want := range wantWorkspace {
+		s, ok := byName[want.name]
+		if !ok {
+			t.Errorf("config/mcp.yaml missing %q server", want.name)
+			continue
+		}
+		if s.URL != want.url {
+			t.Errorf("%s URL = %q, want %q", want.name, s.URL, want.url)
+		}
+		if !s.Remote {
+			t.Errorf("%s Remote = false, want true", want.name)
+		}
+		if s.Credentials != "per_user" || s.CredentialKey != "google_oauth" || s.CredentialDelivery != "oauth2" {
+			t.Errorf("%s credentials = (%q, %q, %q), want (per_user, google_oauth, oauth2)",
+				want.name, s.Credentials, s.CredentialKey, s.CredentialDelivery)
+		}
+		if s.OAuthTokenURL != "https://oauth2.googleapis.com/token" ||
+			s.OAuthClientIDEnv != "GOOGLE_OAUTH_CLIENT_ID" ||
+			s.OAuthClientSecretEnv != "GOOGLE_OAUTH_CLIENT_SECRET" {
+			t.Errorf("%s oauth settings = (%q, %q, %q)",
+				want.name, s.OAuthTokenURL, s.OAuthClientIDEnv, s.OAuthClientSecretEnv)
+		}
+		if s.HealthInterval != 5*time.Minute {
+			t.Errorf("%s HealthInterval = %s, want 5m", want.name, s.HealthInterval)
+		}
+		if len(s.Tools) != len(want.tools) {
+			t.Errorf("%s has %d tools, want %d", want.name, len(s.Tools), len(want.tools))
+		}
+		for toolName, wantRisk := range want.tools {
+			toolCfg, ok := s.Tools[toolName]
+			if !ok {
+				t.Errorf("%s missing tool %q", want.name, toolName)
+				continue
+			}
+			if toolCfg.Risk != wantRisk {
+				t.Errorf("%s tool %q risk = %q, want %q", want.name, toolName, toolCfg.Risk, wantRisk)
+			}
+		}
+	}
 }
 
 func TestShippedMCPConfigStartsWithoutGoogleMapsKey(t *testing.T) {
@@ -240,6 +341,65 @@ func TestShippedMCPConfigStartsWithoutGoogleMapsKey(t *testing.T) {
 	}
 	if _, err := d.Registry.Lookup("google-maps__search_places"); err == nil {
 		t.Fatal("google-maps__search_places registered without GOOGLE_MAPS_API_KEY")
+	}
+}
+
+func TestShippedMCPConfigStartsWithoutOptionalExternalKeys(t *testing.T) {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "tz", Version: "0"}, nil)
+	okHandler := func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "17:05"}}}, nil
+	}
+	srv.AddTool(&sdk.Tool{Name: "get_time", Description: "Current time.", InputSchema: map[string]any{"type": "object"}}, okHandler)
+	srv.AddTool(&sdk.Tool{Name: "convert_time", Description: "Convert time.", InputSchema: map[string]any{"type": "object"}}, okHandler)
+	tzTS := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil))
+	t.Cleanup(tzTS.Close)
+
+	d := testDeps(t, "../../config/mcp.yaml")
+	d.Config.CredentialsKey = nil
+	d.Getenv = func(string) string { return "" }
+	d.Dial = func(ctx context.Context, url string) (*mcp.Session, error) {
+		if url == "http://mcp-timezone:8080/mcp" {
+			return mcp.DialHTTP(ctx, tzTS.URL+"/mcp")
+		}
+		t.Errorf("unexpected Dial(%q)", url)
+		return mcp.DialHTTP(ctx, url)
+	}
+	d.DialWithHeader = func(ctx context.Context, url, headerName, headerValue string) (*mcp.Session, error) {
+		t.Errorf("DialWithHeader unexpectedly called for %q", url)
+		return mcp.DialHTTPWithHeader(ctx, url, headerName, headerValue)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	wait, err := startMCP(ctx, d)
+	if err != nil {
+		t.Fatalf("startMCP: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		wait()
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := d.Registry.Lookup("timezone__get_time"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timezone__get_time never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, absent := range []string{
+		"google-maps__search_places",
+		"google-contacts__search_contacts",
+		"google-calendar__list_events",
+		"google-docs__read_doc",
+		"google-drive__search_files",
+		"google-workspace-search__search_corpus",
+	} {
+		if _, err := d.Registry.Lookup(absent); err == nil {
+			t.Errorf("%s registered without external credentials", absent)
+		}
 	}
 }
 
