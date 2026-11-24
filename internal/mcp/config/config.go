@@ -33,13 +33,17 @@ type Server struct {
 	CredentialEnv    string `yaml:"credential_env"`
 	CredentialHeader string `yaml:"credential_header"`
 	// CredentialDelivery says how a per_user token reaches the server: "header" (one shared
-	// instance, token sent on each call) or "container" (one instance per user).
-	CredentialDelivery string          `yaml:"credential_delivery"`
-	Users              []string        `yaml:"users"` // internal user IDs, or "*" for every user
-	Timeout            time.Duration   `yaml:"timeout"`
-	HealthInterval     time.Duration   `yaml:"health_interval"`
-	MaxResultBytes     int             `yaml:"max_result_bytes"`
-	Tools              map[string]Tool `yaml:"tools"` // the allowlist: only these tools are exposed
+	// local instance, token sent on each call), "container" (one instance per user), or "oauth2"
+	// (per-user refresh token in user_credentials, refreshed via oauth_token_url).
+	CredentialDelivery   string          `yaml:"credential_delivery"`
+	OAuthTokenURL        string          `yaml:"oauth_token_url"`
+	OAuthClientIDEnv     string          `yaml:"oauth_client_id_env"`
+	OAuthClientSecretEnv string          `yaml:"oauth_client_secret_env"`
+	Users                []string        `yaml:"users"` // internal user IDs, or "*" for every user
+	Timeout              time.Duration   `yaml:"timeout"`
+	HealthInterval       time.Duration   `yaml:"health_interval"`
+	MaxResultBytes       int             `yaml:"max_result_bytes"`
+	Tools                map[string]Tool `yaml:"tools"` // the allowlist: only these tools are exposed
 }
 
 // Tool is one allowlisted tool. Its risk comes from here, never from the server.
@@ -113,6 +117,10 @@ func validateServer(s Server, knownUsers []identity.UserID) []error {
 		errs = append(errs, validateDelivery(s)...)
 	default:
 		fail("has unknown credentials %q", s.Credentials)
+	}
+
+	if s.CredentialDelivery != "oauth2" && (s.OAuthTokenURL != "" || s.OAuthClientIDEnv != "" || s.OAuthClientSecretEnv != "") {
+		fail("sets oauth2 fields but does not use oauth2 credential delivery")
 	}
 
 	if s.HealthInterval < 0 {
@@ -218,6 +226,11 @@ func isHTTPSURL(rawURL string) bool {
 	return err == nil && u.Scheme == "https" && u.Host != ""
 }
 
+func isHTTPOrHTTPSURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
 // validateDelivery checks how a per_user server receives its token. A header carries the token
 // to a shared instance, so it must stay on the host; a container is started per user.
 func validateDelivery(s Server) []error {
@@ -244,8 +257,47 @@ func validateDelivery(s Server) []error {
 		if !perUserURL {
 			fail("uses container delivery, so its URL must contain %s", userPlaceholder)
 		}
+	case "oauth2":
+		errs = append(errs, validateOAuth2(s, perUserURL)...)
 	default:
 		fail("has unknown credential_delivery %q", s.CredentialDelivery)
+	}
+	return errs
+}
+
+func validateOAuth2(s Server, perUserURL bool) []error {
+	var errs []error
+	fail := func(format string, args ...any) {
+		errs = append(errs, fmt.Errorf("server %q "+format, append([]any{s.Name}, args...)...))
+	}
+	if s.Transport != "http" {
+		fail("uses oauth2 delivery, which needs transport http")
+	}
+	if perUserURL {
+		fail("uses oauth2 delivery, so its URL must not contain %s", userPlaceholder)
+	}
+	if s.Remote && !isHTTPSURL(s.URL) {
+		fail("is remote with oauth2 delivery, which needs an https URL")
+	}
+	switch {
+	case s.OAuthTokenURL == "":
+		fail("uses oauth2 delivery but names no oauth_token_url")
+	case !isHTTPOrHTTPSURL(s.OAuthTokenURL):
+		fail("has invalid oauth_token_url %q", s.OAuthTokenURL)
+	case s.Remote && !isHTTPSURL(s.OAuthTokenURL):
+		fail("is remote with oauth2 delivery, so oauth_token_url needs an https URL")
+	}
+	switch {
+	case s.OAuthClientIDEnv == "":
+		fail("uses oauth2 delivery but names no oauth_client_id_env")
+	case !isValidEnvName(s.OAuthClientIDEnv):
+		fail("has invalid oauth_client_id_env %q", s.OAuthClientIDEnv)
+	}
+	switch {
+	case s.OAuthClientSecretEnv == "":
+		fail("uses oauth2 delivery but names no oauth_client_secret_env")
+	case !isValidEnvName(s.OAuthClientSecretEnv):
+		fail("has invalid oauth_client_secret_env %q", s.OAuthClientSecretEnv)
 	}
 	return errs
 }

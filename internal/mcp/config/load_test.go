@@ -131,6 +131,46 @@ func TestLoad(t *testing.T) {
 				},
 			}},
 		},
+		{
+			name: "oauth2 server fields",
+			input: `servers:
+  - name: google-calendar
+    transport: http
+    url: https://calendarmcp.googleapis.com/mcp/v1
+    remote: true
+    credentials: per_user
+    credential_key: google_oauth
+    credential_delivery: oauth2
+    oauth_token_url: https://oauth2.googleapis.com/token
+    oauth_client_id_env: GOOGLE_OAUTH_CLIENT_ID
+    oauth_client_secret_env: GOOGLE_OAUTH_CLIENT_SECRET
+    users: ["*"]
+    timeout: 15s
+    health_interval: 5m
+    max_result_bytes: 65536
+    tools:
+      list_events: { risk: read }
+`,
+			want: File{Servers: []Server{
+				{
+					Name:                 "google-calendar",
+					Transport:            "http",
+					URL:                  "https://calendarmcp.googleapis.com/mcp/v1",
+					Remote:               true,
+					Credentials:          "per_user",
+					CredentialKey:        "google_oauth",
+					CredentialDelivery:   "oauth2",
+					OAuthTokenURL:        "https://oauth2.googleapis.com/token",
+					OAuthClientIDEnv:     "GOOGLE_OAUTH_CLIENT_ID",
+					OAuthClientSecretEnv: "GOOGLE_OAUTH_CLIENT_SECRET",
+					Users:                []string{"*"},
+					Timeout:              15 * time.Second,
+					HealthInterval:       5 * time.Minute,
+					MaxResultBytes:       65536,
+					Tools:                map[string]Tool{"list_events": {Risk: tools.RiskRead}},
+				},
+			}},
+		},
 	}
 
 	for _, tt := range tests {

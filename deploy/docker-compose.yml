@@ -29,6 +29,8 @@ services:
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:-}
       ADMIN_USER_ID: ${ADMIN_USER_ID:-}
       GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
       MCP_CONFIG: /etc/nestor/mcp.yaml
       SKILLS_CONFIG: /etc/nestor/skills.yaml
       SKILLS_DIR: /etc/nestor/skills

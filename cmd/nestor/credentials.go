@@ -16,15 +16,28 @@ import (
 	"github.com/epierre/nestor/internal/store/postgres"
 )
 
-const credentialsUsage = "usage: nestor credentials set <user-id> <key>   (the value is read from stdin)"
+const credentialsUsage = `usage:
+  nestor credentials set <user-id> <key>   (the value is read from stdin)
+  nestor credentials google-auth <user-id> [--key google_oauth] [--manual | --listen 127.0.0.1:8085] [--scopes ...]`
 
-// runCredentials handles "nestor credentials ...". Only "set" exists. It opens the database named
-// by the environment, so it runs in the same place as the agent.
+// runCredentials handles "nestor credentials ...". It opens the database named by the environment,
+// so it runs in the same place as the agent.
 func runCredentials(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout io.Writer) error {
-	if len(args) == 0 || args[0] != "set" {
+	if len(args) == 0 {
 		return errors.New(credentialsUsage)
 	}
-	user, key, err := parseSetArgs(args[1:])
+	switch args[0] {
+	case "set":
+		return runCredentialsSet(ctx, args[1:], getenv, stdin, stdout)
+	case "google-auth":
+		return runGoogleAuth(ctx, args[1:], getenv, stdin, stdout)
+	default:
+		return errors.New(credentialsUsage)
+	}
+}
+
+func runCredentialsSet(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout io.Writer) error {
+	user, key, err := parseSetArgs(args)
 	if err != nil {
 		return err
 	}

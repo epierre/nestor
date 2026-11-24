@@ -172,3 +172,36 @@ func TestGoogleMapsKeyScopedToNestor(t *testing.T) {
 		}
 	}
 }
+
+func TestGoogleOAuthEnvScopedToNestor(t *testing.T) {
+	raw, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read compose file: %v", err)
+	}
+	var c compose
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatalf("parse compose file: %v", err)
+	}
+
+	nestor, ok := c.Services["nestor"]
+	if !ok {
+		t.Fatal("missing nestor service")
+	}
+	wantEnv := map[string]string{
+		"GOOGLE_OAUTH_CLIENT_ID":     "${GOOGLE_OAUTH_CLIENT_ID:-}",
+		"GOOGLE_OAUTH_CLIENT_SECRET": "${GOOGLE_OAUTH_CLIENT_SECRET:-}",
+	}
+	for k, want := range wantEnv {
+		if got := nestor.Environment[k]; got != want {
+			t.Errorf("nestor %s = %q, want %q", k, got, want)
+		}
+		for name, s := range c.Services {
+			if name == "nestor" {
+				continue
+			}
+			if _, exists := s.Environment[k]; exists {
+				t.Errorf("service %q must not define %s", name, k)
+			}
+		}
+	}
+}
