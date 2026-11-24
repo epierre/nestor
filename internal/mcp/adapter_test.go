@@ -17,6 +17,7 @@ import (
 	"github.com/epierre/nestor/internal/credentials"
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/mcp/config"
+	"github.com/epierre/nestor/internal/obs"
 	"github.com/epierre/nestor/internal/store"
 	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
@@ -50,6 +51,13 @@ func fakeServer(t *testing.T) *Session {
 			return &sdk.CallToolResult{Content: []sdk.Content{
 				&sdk.TextContent{Text: strings.Repeat("é", 1<<20)},
 			}}, nil
+		})
+	srv.AddTool(&sdk.Tool{Name: "fail_crit", InputSchema: object},
+		func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{
+				IsError: true,
+				Content: []sdk.Content{&sdk.TextContent{Text: "top-secret-result"}},
+			}, nil
 		})
 
 	serverT, clientT := sdk.NewInMemoryTransports()
@@ -541,4 +549,133 @@ func TestMissingCredentialHidesTools(t *testing.T) {
 	if strings.Contains(logs.String(), "test-token") {
 		t.Errorf("log contains a secret value: %s", logs.String())
 	}
+}
+
+func TestApprovedCriticalMCPToolErrorNotLogged(t *testing.T) {
+	const user = identity.UserID(1)
+	ctx := obs.WithRequestID(identity.WithUser(context.Background(), user), "req-mcp-err")
+	st := testutil.NewFakeStore()
+	reg := tools.NewRegistry()
+	server := weatherServer(map[string]config.Tool{"fail_crit": {Risk: tools.RiskCritical}})
+	if err := approved(reg).Register(ctx, server, fakeServer(t)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	tool, err := reg.Lookup("weather__fail_crit")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	conv, err := st.ActiveConversation(ctx, user)
+	if err != nil {
+		t.Fatalf("ActiveConversation: %v", err)
+	}
+	tcID, err := st.RecordToolCall(ctx, user, store.ToolCall{
+		ConversationID: conv.ID,
+		ToolName:       "weather__fail_crit",
+		ArgsJSON:       json.RawMessage(`{}`),
+		Risk:           tools.RiskCritical,
+		Status:         store.ToolCallStatusProposed,
+		StartedAt:      time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("RecordToolCall: %v", err)
+	}
+
+	gate := approval.New(st, reg, time.Hour)
+	action, err := gate.Propose(ctx, user, tool, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if err := st.LinkActionToolCall(ctx, user, action.ID, tcID); err != nil {
+		t.Fatalf("LinkActionToolCall: %v", err)
+	}
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&logs, nil))))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	decided, err := gate.Decide(ctx, user, action.ID, approval.Approve)
+	if err == nil || !strings.Contains(err.Error(), "top-secret-result") {
+		t.Fatalf("Decide err = %v, want containing %q", err, "top-secret-result")
+	}
+	if decided.State != store.PendingFailed {
+		t.Errorf("decided state = %q, want %q", decided.State, store.PendingFailed)
+	}
+
+	raw := logs.String()
+	if strings.Contains(raw, "top-secret-result") {
+		t.Fatalf("logs leaked untrusted MCP error text:\n%s", raw)
+	}
+
+	var sawFailed bool
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if entry["msg"] != "critical tool failed" {
+			continue
+		}
+		sawFailed = true
+		if entry["request_id"] != "req-mcp-err" {
+			t.Errorf("request_id = %v, want req-mcp-err", entry["request_id"])
+		}
+		if entry["user_id"] != float64(user) {
+			t.Errorf("user_id = %v, want %v", entry["user_id"], float64(user))
+		}
+		if entry["action_id"] != action.ID {
+			t.Errorf("action_id = %v, want %s", entry["action_id"], action.ID)
+		}
+		if entry["tool"] != "weather__fail_crit" {
+			t.Errorf("tool = %v, want weather__fail_crit", entry["tool"])
+		}
+		if entry["reason"] != "execution_error" {
+			t.Errorf("reason = %v, want execution_error", entry["reason"])
+		}
+		if _, ok := entry["latency_ms"].(float64); !ok {
+			t.Errorf("latency_ms missing or non-numeric: %v", entry["latency_ms"])
+		}
+		if _, hasErr := entry["error"]; hasErr {
+			t.Errorf("unexpected error attribute in log entry: %v", entry)
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("missing critical tool failed log line; raw:\n%s", raw)
+	}
+
+	stored, err := st.GetPendingAction(ctx, user, action.ID)
+	if err != nil {
+		t.Fatalf("GetPendingAction: %v", err)
+	}
+	if stored.State != store.PendingFailed || !strings.Contains(stored.Error, "top-secret-result") {
+		t.Errorf("stored pending action = %+v, want failed with error containing %q", stored, "top-secret-result")
+	}
+
+	calls := st.ToolCalls(user)
+	if len(calls) != 1 {
+		t.Fatalf("got %d tool calls, want 1", len(calls))
+	}
+	if calls[0].Status != store.ToolCallStatusError || !strings.Contains(calls[0].Error, "top-secret-result") {
+		t.Errorf("tool call = %+v, want error status with error containing %q", calls[0], "top-secret-result")
+	}
+
+	t.Run("direct slog of IsError omits tool text", func(t *testing.T) {
+		var directLogs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(&directLogs, nil))))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		_, execErr := tool.Execute(ctx, json.RawMessage(`{}`))
+		if execErr == nil || execErr.Error() != "top-secret-result" {
+			t.Fatalf("Execute err = %v, want %q", execErr, "top-secret-result")
+		}
+		slog.Warn("direct", "error", execErr)
+		if strings.Contains(directLogs.String(), "top-secret-result") {
+			t.Errorf("direct slog leaked untrusted MCP error text:\n%s", directLogs.String())
+		}
+	})
 }

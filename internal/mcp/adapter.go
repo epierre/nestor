@@ -394,6 +394,20 @@ func escapeKeyFormatChars(s string) string {
 	return b.String()
 }
 
+// toolResultError carries the text of an MCP IsError result for persistence in tool_calls and
+// pending_actions while redacting untrusted server text if logged directly through slog.
+type toolResultError struct {
+	text string
+}
+
+func (e *toolResultError) Error() string {
+	return e.text
+}
+
+func (e *toolResultError) LogValue() slog.Value {
+	return slog.StringValue("mcp tool returned error")
+}
+
 // Execute calls the tool under the server's timeout. A timeout or a transport failure is an error;
 // a result longer than the size cap is cut and marked as truncated.
 func (t *adapterTool) Execute(ctx context.Context, args json.RawMessage) (tools.Result, error) {
@@ -407,13 +421,13 @@ func (t *adapterTool) Execute(ctx context.Context, args json.RawMessage) (tools.
 	res, err := session.CallTool(callCtx, t.remote, args)
 	if err != nil {
 		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
-			return tools.Result{}, fmt.Errorf("mcp tool %s timed out after %s", t.name, t.timeout)
+			return tools.Result{}, fmt.Errorf("mcp tool %s timed out after %s: %w", t.name, t.timeout, context.DeadlineExceeded)
 		}
 		return tools.Result{}, err
 	}
 	text := resultText(res)
 	if res.IsError {
-		return tools.Result{}, errors.New(text)
+		return tools.Result{}, &toolResultError{text: text}
 	}
 	content, truncated := capResult(text, t.maxBytes)
 	return tools.Result{Content: content, Truncated: truncated}, nil
