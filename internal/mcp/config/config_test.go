@@ -341,6 +341,194 @@ func TestValidate(t *testing.T) {
 			mutate:  func(s *Server) { s.HealthInterval = -1 * time.Second },
 			wantErr: `negative health_interval`,
 		},
+		{
+			name: "oauth2 valid remote server",
+			mutate: func(s *Server) {
+				s.URL = "https://calendarmcp.googleapis.com/mcp/v1"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "https://oauth2.googleapis.com/token"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+		},
+		{
+			name: "oauth2 valid local server",
+			mutate: func(s *Server) {
+				s.URL = "http://127.0.0.1:8080/mcp"
+				s.Remote = false
+				s.Credentials = "per_user"
+				s.CredentialKey = "local_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "http://127.0.0.1:8081/token"
+				s.OAuthClientIDEnv = "LOCAL_OAUTH_ID"
+				s.OAuthClientSecretEnv = "LOCAL_OAUTH_SECRET"
+			},
+		},
+		{
+			name: "oauth2 over stdio",
+			mutate: func(s *Server) {
+				s.Transport = "stdio"
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "https://oauth2.googleapis.com/token"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+			wantErr: `needs transport http`,
+		},
+		{
+			name: "oauth2 with per-user URL placeholder",
+			mutate: func(s *Server) {
+				s.URL = "http://mcp-oauth-{user}:8080/mcp"
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "https://oauth2.googleapis.com/token"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+			wantErr: `must not contain {user}`,
+		},
+		{
+			name: "oauth2 missing oauth_token_url",
+			mutate: func(s *Server) {
+				s.URL = "https://calendarmcp.googleapis.com/mcp/v1"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+			wantErr: `no oauth_token_url`,
+		},
+		{
+			name: "oauth2 invalid oauth_token_url",
+			mutate: func(s *Server) {
+				s.URL = "https://calendarmcp.googleapis.com/mcp/v1"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "not-a-url"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+			wantErr: `invalid oauth_token_url`,
+		},
+		{
+			name: "oauth2 remote with plain http url",
+			mutate: func(s *Server) {
+				s.URL = "http://calendarmcp.googleapis.com/mcp/v1"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "https://oauth2.googleapis.com/token"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+			wantErr: `needs an https URL`,
+		},
+		{
+			name: "oauth2 remote with plain http oauth_token_url",
+			mutate: func(s *Server) {
+				s.URL = "https://calendarmcp.googleapis.com/mcp/v1"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "http://oauth2.googleapis.com/token"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+			wantErr: `oauth_token_url needs an https URL`,
+		},
+		{
+			name: "oauth2 missing oauth_client_id_env",
+			mutate: func(s *Server) {
+				s.URL = "https://calendarmcp.googleapis.com/mcp/v1"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "https://oauth2.googleapis.com/token"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+			wantErr: `no oauth_client_id_env`,
+		},
+		{
+			name: "oauth2 invalid oauth_client_id_env",
+			mutate: func(s *Server) {
+				s.URL = "https://calendarmcp.googleapis.com/mcp/v1"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "https://oauth2.googleapis.com/token"
+				s.OAuthClientIDEnv = "bad-id"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+			wantErr: `invalid oauth_client_id_env`,
+		},
+		{
+			name: "oauth2 missing oauth_client_secret_env",
+			mutate: func(s *Server) {
+				s.URL = "https://calendarmcp.googleapis.com/mcp/v1"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "https://oauth2.googleapis.com/token"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+			},
+			wantErr: `no oauth_client_secret_env`,
+		},
+		{
+			name: "oauth2 invalid oauth_client_secret_env",
+			mutate: func(s *Server) {
+				s.URL = "https://calendarmcp.googleapis.com/mcp/v1"
+				s.Remote = true
+				s.Credentials = "per_user"
+				s.CredentialKey = "google_oauth"
+				s.CredentialDelivery = "oauth2"
+				s.OAuthTokenURL = "https://oauth2.googleapis.com/token"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+				s.OAuthClientSecretEnv = "1SECRET"
+			},
+			wantErr: `invalid oauth_client_secret_env`,
+		},
+		{
+			name: "oauth_token_url set on none",
+			mutate: func(s *Server) {
+				s.Credentials = "none"
+				s.OAuthTokenURL = "https://oauth2.googleapis.com/token"
+			},
+			wantErr: `does not use oauth2 credential delivery`,
+		},
+		{
+			name: "oauth_client_id_env set on shared",
+			mutate: func(s *Server) {
+				s.Credentials = "shared"
+				s.CredentialEnv = "EXAMPLE_TOKEN"
+				s.OAuthClientIDEnv = "GOOGLE_OAUTH_CLIENT_ID"
+			},
+			wantErr: `does not use oauth2 credential delivery`,
+		},
+		{
+			name: "oauth_client_secret_env set on header",
+			mutate: func(s *Server) {
+				s.Credentials = "per_user"
+				s.CredentialKey = "todoist_token"
+				s.CredentialDelivery = "header"
+				s.OAuthClientSecretEnv = "GOOGLE_OAUTH_CLIENT_SECRET"
+			},
+			wantErr: `does not use oauth2 credential delivery`,
+		},
 	}
 
 	for _, tt := range tests {
