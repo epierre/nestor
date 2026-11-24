@@ -40,10 +40,10 @@ type Server struct {
 	OAuthClientIDEnv     string          `yaml:"oauth_client_id_env"`
 	OAuthClientSecretEnv string          `yaml:"oauth_client_secret_env"`
 	Users                []string        `yaml:"users"` // internal user IDs, or "*" for every user
-	Timeout            time.Duration   `yaml:"timeout"`
-	HealthInterval     time.Duration   `yaml:"health_interval"`
-	MaxResultBytes     int             `yaml:"max_result_bytes"`
-	Tools              map[string]Tool `yaml:"tools"` // the allowlist: only these tools are exposed
+	Timeout              time.Duration   `yaml:"timeout"`
+	HealthInterval       time.Duration   `yaml:"health_interval"`
+	MaxResultBytes       int             `yaml:"max_result_bytes"`
+	Tools                map[string]Tool `yaml:"tools"` // the allowlist: only these tools are exposed
 }
 
 // Tool is one allowlisted tool. Its risk comes from here, never from the server.
