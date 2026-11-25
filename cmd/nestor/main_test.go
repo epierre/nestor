@@ -92,16 +92,23 @@ func TestAllowedIdentities(t *testing.T) {
 	}
 }
 
-func TestTaskAndReminderToolsAlwaysRegistered(t *testing.T) {
+func TestBuiltInToolsAlwaysRegistered(t *testing.T) {
 	st := testutil.NewFakeStore()
-	reg := toolRegistry(false, &fakeNotifier{}, st, time.UTC)
+	reg := toolRegistry(false, &fakeNotifier{}, st, &testutil.FakeModel{}, "web-search", time.UTC)
 	var got []string
 	for _, def := range reg.Tools() {
 		got = append(got, def.Name)
 	}
-	want := []string{"task_add", "task_list", "task_complete", "task_delete", "reminder_add", "reminder_list", "reminder_cancel"}
+	want := []string{"task_add", "task_list", "task_complete", "task_delete", "reminder_add", "reminder_list", "reminder_cancel", "web_search"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("tools %v, want %v", got, want)
+	}
+	ws, err := reg.Lookup("web_search")
+	if err != nil {
+		t.Fatalf("Lookup web_search: %v", err)
+	}
+	if ws.Risk() != tools.RiskRead {
+		t.Errorf("web_search risk %v, want read", ws.Risk())
 	}
 }
 
@@ -115,7 +122,7 @@ func TestDemoToolsOfferedOnlyWhenEnabled(t *testing.T) {
 	}
 
 	st := testutil.NewFakeStore()
-	on := toolRegistry(true, &fakeNotifier{}, st, time.UTC)
+	on := toolRegistry(true, &fakeNotifier{}, st, &testutil.FakeModel{}, "web-search", time.UTC)
 	if got := names(on); !slices.Contains(got, "current_time") || !slices.Contains(got, "notify_self") {
 		t.Errorf("enabled: tools %v, want current_time and notify_self", got)
 	}
@@ -127,18 +134,18 @@ func TestDemoToolsOfferedOnlyWhenEnabled(t *testing.T) {
 		t.Errorf("notify_self risk %v, want critical", notify.Risk())
 	}
 
-	if got := names(toolRegistry(false, &fakeNotifier{}, st, time.UTC)); slices.Contains(got, "notify_self") || slices.Contains(got, "current_time") {
+	if got := names(toolRegistry(false, &fakeNotifier{}, st, &testutil.FakeModel{}, "web-search", time.UTC)); slices.Contains(got, "notify_self") || slices.Contains(got, "current_time") {
 		t.Errorf("disabled: tools %v, want no demo tools", got)
 	}
 }
 
 func TestDemoToolsReachTheModel(t *testing.T) {
-	cfg := config.Config{EnableDemoTools: true, LLMModel: "cheap", HistoryLimit: 5, MaxLoopIterations: 2}
+	cfg := config.Config{EnableDemoTools: true, LLMModel: "cheap", WebSearchModel: "web-search", HistoryLimit: 5, MaxLoopIterations: 2}
 	st := testutil.NewFakeStore()
-	reg := toolRegistry(true, &fakeNotifier{}, st, time.UTC)
 	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
 		return model.CompletionResponse{Content: "ok"}, nil
 	}}
+	reg := toolRegistry(true, &fakeNotifier{}, st, client, cfg.WebSearchModel, time.UTC)
 	a := agent.New(client, st, agentOptions(cfg, reg, time.UTC))
 
 	if _, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "hello"); err != nil {
@@ -155,7 +162,7 @@ func TestDemoToolsReachTheModel(t *testing.T) {
 
 func TestNotifySelfSendsToTheRequestChat(t *testing.T) {
 	notifier := &fakeNotifier{}
-	reg := toolRegistry(true, notifier, testutil.NewFakeStore(), time.UTC)
+	reg := toolRegistry(true, notifier, testutil.NewFakeStore(), &testutil.FakeModel{}, "web-search", time.UTC)
 	tool, err := reg.Lookup("notify_self")
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
@@ -175,5 +182,94 @@ func TestNotifySelfSendsToTheRequestChat(t *testing.T) {
 	}
 	if len(notifier.chats) != 1 {
 		t.Errorf("a message was sent without a chat: %v", notifier.chats)
+	}
+}
+
+func TestWebSearchEndToEndWithAgent(t *testing.T) {
+	st := testutil.NewFakeStore()
+	cfg := config.Config{
+		LLMModel:          "cheap",
+		WebSearchModel:    "custom-search",
+		HistoryLimit:      10,
+		MaxLoopIterations: 4,
+	}
+	client := &testutil.FakeModel{Reply: func(req model.CompletionRequest) (model.CompletionResponse, error) {
+		if req.Model == "custom-search" {
+			return model.CompletionResponse{
+				Content:   "Grounded answer for " + req.Messages[1].Content,
+				Citations: []model.Citation{{Title: "Official Docs", URL: "https://example.org/docs"}},
+				Usage:     model.Usage{PromptTokens: 11, CompletionTokens: 7},
+			}, nil
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleTool {
+			return model.CompletionResponse{
+				Content: "Reply from tool: " + last.Content,
+				Usage:   model.Usage{PromptTokens: 30, CompletionTokens: 12},
+			}, nil
+		}
+		return model.CompletionResponse{
+			ToolCalls: []model.ToolCall{{
+				ID:        "call_ws_" + last.Content,
+				Name:      "web_search",
+				Arguments: json.RawMessage(`{"query":"` + last.Content + `"}`),
+			}},
+			Usage: model.Usage{PromptTokens: 20, CompletionTokens: 8},
+		}, nil
+	}}
+
+	reg := toolRegistry(false, &fakeNotifier{}, st, client, cfg.WebSearchModel, time.UTC)
+	a := agent.New(client, st, agentOptions(cfg, reg, time.UTC))
+
+	reply1, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "alpha")
+	if err != nil {
+		t.Fatalf("HandleMessage user 1: %v", err)
+	}
+	reply2, err := a.HandleMessage(identity.WithUser(context.Background(), 2), "beta")
+	if err != nil {
+		t.Fatalf("HandleMessage user 2: %v", err)
+	}
+
+	if !strings.Contains(reply1, "[data]") || !strings.Contains(reply1, "Grounded answer for alpha") || !strings.Contains(reply1, "Official Docs (https://example.org/docs)") {
+		t.Errorf("reply1 = %q", reply1)
+	}
+	if !strings.Contains(reply2, "Grounded answer for beta") || strings.Contains(reply2, "alpha") {
+		t.Errorf("reply2 = %q", reply2)
+	}
+
+	// Each user should have 3 model calls: main turn 1 -> web_search (custom-search) -> main turn 2,
+	// and 1 web_search tool call under their own user ID and conversation.
+	for _, tc := range []struct {
+		user  identity.UserID
+		query string
+	}{
+		{1, "alpha"},
+		{2, "beta"},
+	} {
+		mcalls := st.ModelCalls(tc.user)
+		if len(mcalls) != 3 {
+			t.Fatalf("user %d model calls = %d, want 3: %+v", tc.user, len(mcalls), mcalls)
+		}
+		if mcalls[0].Model != "cheap" || mcalls[1].Model != "custom-search" || mcalls[2].Model != "cheap" {
+			t.Errorf("user %d model sequence = [%s, %s, %s]", tc.user, mcalls[0].Model, mcalls[1].Model, mcalls[2].Model)
+		}
+		if mcalls[1].ConversationID != mcalls[0].ConversationID {
+			t.Errorf("user %d search conversation %d != main %d", tc.user, mcalls[1].ConversationID, mcalls[0].ConversationID)
+		}
+		tcalls := st.ToolCalls(tc.user)
+		if len(tcalls) != 1 || tcalls[0].ToolName != "web_search" || tcalls[0].Status != "executed" {
+			t.Errorf("user %d tool calls = %+v", tc.user, tcalls)
+		}
+	}
+
+	// Verify search request had no tools and no conversation history from the other user.
+	reqs := client.Requests()
+	if len(reqs) != 6 {
+		t.Fatalf("total model requests = %d, want 6", len(reqs))
+	}
+	for _, idx := range []int{1, 4} {
+		if len(reqs[idx].Tools) != 0 || len(reqs[idx].Messages) != 2 {
+			t.Errorf("search req[%d] not isolated: tools=%d msgs=%d", idx, len(reqs[idx].Tools), len(reqs[idx].Messages))
+		}
 	}
 }

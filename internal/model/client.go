@@ -190,8 +190,9 @@ type wireToolCall struct {
 type wireResponse struct {
 	Choices []struct {
 		Message struct {
-			Content   string         `json:"content"`
-			ToolCalls []wireToolCall `json:"tool_calls"`
+			Content     string           `json:"content"`
+			ToolCalls   []wireToolCall   `json:"tool_calls"`
+			Annotations []wireAnnotation `json:"annotations"`
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
@@ -199,6 +200,16 @@ type wireResponse struct {
 		CompletionTokens int      `json:"completion_tokens"`
 		Cost             *float64 `json:"cost"`
 	} `json:"usage"`
+}
+
+type wireAnnotation struct {
+	Type        string           `json:"type"`
+	URLCitation *wireURLCitation `json:"url_citation"`
+}
+
+type wireURLCitation struct {
+	URL   string `json:"url"`
+	Title string `json:"title"`
 }
 
 func toWireRequest(req CompletionRequest) wireRequest {
@@ -248,6 +259,18 @@ func fromWireResponse(wire wireResponse, costValue string) CompletionResponse {
 			ID:        call.ID,
 			Name:      call.Function.Name,
 			Arguments: json.RawMessage(call.Function.Arguments),
+		})
+	}
+	for _, ann := range message.Annotations {
+		if ann.Type != "url_citation" || ann.URLCitation == nil {
+			continue
+		}
+		if strings.TrimSpace(ann.URLCitation.URL) == "" {
+			continue
+		}
+		resp.Citations = append(resp.Citations, Citation{
+			Title: ann.URLCitation.Title,
+			URL:   ann.URLCitation.URL,
 		})
 	}
 	return resp

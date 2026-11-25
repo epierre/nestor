@@ -205,3 +205,67 @@ func TestGoogleOAuthEnvScopedToNestor(t *testing.T) {
 		}
 	}
 }
+
+func TestWebSearchModelScopedToNestor(t *testing.T) {
+	raw, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read compose file: %v", err)
+	}
+	var c compose
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatalf("parse compose file: %v", err)
+	}
+
+	nestor, ok := c.Services["nestor"]
+	if !ok {
+		t.Fatal("missing nestor service")
+	}
+	if got := nestor.Environment["WEB_SEARCH_MODEL"]; got != "${WEB_SEARCH_MODEL:-}" {
+		t.Errorf("nestor WEB_SEARCH_MODEL = %q, want ${WEB_SEARCH_MODEL:-}", got)
+	}
+	for name, s := range c.Services {
+		if name == "nestor" {
+			continue
+		}
+		if _, exists := s.Environment["WEB_SEARCH_MODEL"]; exists {
+			t.Errorf("service %q must not define WEB_SEARCH_MODEL", name)
+		}
+	}
+}
+
+func TestLiteLLMConfigDefinesWebSearchAlias(t *testing.T) {
+	raw, err := os.ReadFile("litellm.yaml")
+	if err != nil {
+		t.Fatalf("read litellm.yaml: %v", err)
+	}
+	var cfg struct {
+		ModelList []struct {
+			ModelName     string `yaml:"model_name"`
+			LiteLLMParams struct {
+				Model            string         `yaml:"model"`
+				APIKey           string         `yaml:"api_key"`
+				WebSearchOptions map[string]any `yaml:"web_search_options"`
+			} `yaml:"litellm_params"`
+		} `yaml:"model_list"`
+	}
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse litellm.yaml: %v", err)
+	}
+
+	for _, entry := range cfg.ModelList {
+		if entry.ModelName != "web-search" {
+			continue
+		}
+		if entry.LiteLLMParams.Model == "" {
+			t.Error("web-search litellm_params.model is empty")
+		}
+		if entry.LiteLLMParams.APIKey != "os.environ/GEMINI_API_KEY" {
+			t.Errorf("web-search api_key = %q, want os.environ/GEMINI_API_KEY", entry.LiteLLMParams.APIKey)
+		}
+		if entry.LiteLLMParams.WebSearchOptions == nil {
+			t.Error("web-search litellm_params.web_search_options must be set")
+		}
+		return
+	}
+	t.Fatal("litellm.yaml missing web-search entry in model_list")
+}

@@ -565,3 +565,72 @@ func assertJSONEqual(t *testing.T, got, want []byte) {
 		t.Errorf("got %s, want %s", got, want)
 	}
 }
+
+func TestCompleteParsesURLCitations(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []Citation
+	}{
+		{
+			name: "url_citation entries with and without title",
+			body: `{
+				"choices": [{
+					"message": {
+						"content": "Go 1.25 is out.",
+						"annotations": [
+							{"type": "url_citation", "url_citation": {"url": "https://go.dev/doc/devel/release", "title": "Go Release History"}},
+							{"type": "url_citation", "url_citation": {"url": "https://go.dev/blog/go1.25", "title": ""}}
+						]
+					}
+				}],
+				"usage": {"prompt_tokens": 10, "completion_tokens": 5}
+			}`,
+			want: []Citation{
+				{Title: "Go Release History", URL: "https://go.dev/doc/devel/release"},
+				{Title: "", URL: "https://go.dev/blog/go1.25"},
+			},
+		},
+		{
+			name: "no annotations field",
+			body: `{
+				"choices": [{"message": {"content": "Plain reply"}}],
+				"usage": {"prompt_tokens": 5, "completion_tokens": 2}
+			}`,
+			want: nil,
+		},
+		{
+			name: "ignores unknown types, nil url_citation, and blank URLs",
+			body: `{
+				"choices": [{
+					"message": {
+						"content": "Filtered reply",
+						"annotations": [
+							{"type": "file_citation", "url_citation": {"url": "https://ignored.example", "title": "Wrong type"}},
+							{"type": "url_citation"},
+							{"type": "url_citation", "url_citation": {"url": "   ", "title": "Blank URL"}},
+							{"type": "url_citation", "url_citation": {"url": "https://valid.example/page", "title": "Valid"}}
+						]
+					}
+				}],
+				"usage": {"prompt_tokens": 8, "completion_tokens": 4}
+			}`,
+			want: []Citation{
+				{Title: "Valid", URL: "https://valid.example/page"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newProxy(t, http.StatusOK, nil, []byte(tt.body))
+			got, err := NewClient(p.URL+"/v1", testAPIKey).Complete(context.Background(), CompletionRequest{Model: "web-search"})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if !reflect.DeepEqual(got.Citations, tt.want) {
+				t.Errorf("Citations = %+v, want %+v", got.Citations, tt.want)
+			}
+		})
+	}
+}
