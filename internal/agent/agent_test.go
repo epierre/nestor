@@ -2225,3 +2225,62 @@ func TestDispatchToolCallsProposalRejections(t *testing.T) {
 		}
 	})
 }
+
+type convCapturingTool struct {
+	gotUser identity.UserID
+	gotConv int64
+	userErr error
+	convErr error
+}
+
+func (c *convCapturingTool) Name() string        { return "capture_conv" }
+func (c *convCapturingTool) Description() string { return "Captures user and conversation from ctx." }
+func (c *convCapturingTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
+}
+func (c *convCapturingTool) Risk() tools.Risk                        { return tools.RiskRead }
+func (c *convCapturingTool) Preview(json.RawMessage) (string, error) { return "capture", nil }
+func (c *convCapturingTool) Execute(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
+	c.gotUser, c.userErr = identity.UserFrom(ctx)
+	c.gotConv, c.convErr = store.ConversationFrom(ctx)
+	return tools.Result{Content: "ok"}, nil
+}
+
+func TestToolReceivesConversationContext(t *testing.T) {
+	st := testutil.NewFakeStore()
+	conv, err := st.ActiveConversation(identity.WithUser(context.Background(), 7), 7)
+	if err != nil {
+		t.Fatalf("ActiveConversation: %v", err)
+	}
+
+	reg := tools.NewRegistry()
+	capturer := &convCapturingTool{}
+	if err := reg.Register(capturer); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	turns := []model.CompletionResponse{
+		{ToolCalls: []model.ToolCall{{ID: "call_1", Name: "capture_conv", Arguments: json.RawMessage(`{}`)}}},
+		{Content: "done"},
+	}
+	var turn int
+	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+		resp := turns[turn]
+		turn++
+		return resp, nil
+	}}
+	opts := testOptions()
+	opts.Tools = reg
+	a := New(client, st, opts)
+
+	reply := send(t, a, 7, "check context")
+	if reply != "done" {
+		t.Fatalf("reply = %q, want done", reply)
+	}
+	if capturer.userErr != nil || capturer.gotUser != 7 {
+		t.Errorf("gotUser=%d err=%v, want 7 nil", capturer.gotUser, capturer.userErr)
+	}
+	if capturer.convErr != nil || capturer.gotConv != conv.ID {
+		t.Errorf("gotConv=%d err=%v, want %d nil", capturer.gotConv, capturer.convErr, conv.ID)
+	}
+}

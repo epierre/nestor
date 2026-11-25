@@ -115,6 +115,7 @@ func (a *Agent) HandleMessage(ctx context.Context, text string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("load conversation: %w", err)
 	}
+	ctx = store.WithConversation(ctx, conversation.ID)
 	if _, err := a.store.AppendMessage(ctx, user, conversation.ID, model.RoleUser, text); err != nil {
 		return "", fmt.Errorf("store user message: %w", err)
 	}
