@@ -65,11 +65,18 @@ type Attempt struct {
 	Err       error // nil for the attempt that succeeded
 }
 
+// Citation is a source URL referenced by a grounded model response.
+type Citation struct {
+	Title string
+	URL   string
+}
+
 // CompletionResponse carries either text or tool calls, plus usage. Usage describes the successful
 // attempt, the last one in Attempts.
 type CompletionResponse struct {
 	Content   string
 	ToolCalls []ToolCall
+	Citations []Citation
 	Usage     Usage
 	Attempts  []Attempt
 }
