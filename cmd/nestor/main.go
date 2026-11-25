@@ -29,6 +29,7 @@ import (
 	"github.com/epierre/nestor/internal/store/postgres"
 	"github.com/epierre/nestor/internal/tasks"
 	"github.com/epierre/nestor/internal/tools"
+	"github.com/epierre/nestor/internal/websearch"
 )
 
 const (
@@ -82,7 +83,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load timezone: %w", err)
 	}
-	registry := toolRegistry(cfg.EnableDemoTools, bot, st, loc)
+	registry := toolRegistry(cfg.EnableDemoTools, bot, st, client, cfg.WebSearchModel, loc)
 	active, err := st.ListActiveUsers(ctx)
 	if err != nil {
 		return fmt.Errorf("list users: %w", err)
@@ -143,9 +144,9 @@ type chatNotifier interface {
 // reminderTick is how often due reminders are looked for.
 const reminderTick = 30 * time.Second
 
-// toolRegistry returns the tools the agent may call: the task and reminder tools always, and the
-// demo tools when enabled.
-func toolRegistry(enableDemo bool, notifier chatNotifier, st store.Store, loc *time.Location) *tools.Registry {
+// toolRegistry returns the tools the agent may call: the built-in task, reminder, and web_search
+// tools always, and the demo tools when enabled.
+func toolRegistry(enableDemo bool, notifier chatNotifier, st store.Store, client model.ModelClient, webSearchModel string, loc *time.Location) *tools.Registry {
 	reg := tools.NewRegistry()
 	// Each name is registered once, so registration cannot fail.
 	for _, tool := range tasks.Tools(st) {
@@ -154,6 +155,7 @@ func toolRegistry(enableDemo bool, notifier chatNotifier, st store.Store, loc *t
 	for _, tool := range reminders.Tools(st, loc, time.Now) {
 		_ = reg.Register(tool)
 	}
+	_ = reg.Register(websearch.NewTool(client, st, websearch.Options{Model: webSearchModel, Location: loc}))
 	_ = tools.RegisterDemoTools(reg, enableDemo, notifySelf(notifier))
 	return reg
 }

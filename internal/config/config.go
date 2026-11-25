@@ -16,6 +16,7 @@ import (
 
 const (
 	defaultLLMModel           = "cheap"
+	defaultWebSearchModel     = "web-search"
 	defaultHistoryLimit       = 30
 	defaultMaxLoopIterations  = 8
 	defaultApprovalTTL        = 24 * time.Hour
@@ -38,6 +39,7 @@ type Config struct {
 	LLMBaseURL           string
 	LLMAPIKey            string
 	LLMModel             string
+	WebSearchModel       string
 	HistoryLimit         int
 	MaxLoopIterations    int
 	EnableDemoTools      bool
@@ -119,6 +121,7 @@ func Load(getenv func(string) string) (Config, error) {
 		LLMBaseURL:         required("LLM_BASE_URL"),
 		LLMAPIKey:          required("LLM_API_KEY"),
 		LLMModel:           get("LLM_MODEL"),
+		WebSearchModel:     get("WEB_SEARCH_MODEL"),
 		HistoryLimit:       positiveInt("HISTORY_LIMIT", defaultHistoryLimit),
 		MaxLoopIterations:  positiveInt("MAX_LOOP_ITERATIONS", defaultMaxLoopIterations),
 		EnableDemoTools:    boolean("ENABLE_DEMO_TOOLS", false),
@@ -127,6 +130,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if cfg.LLMModel == "" {
 		cfg.LLMModel = defaultLLMModel
+	}
+	if cfg.WebSearchModel == "" {
+		cfg.WebSearchModel = defaultWebSearchModel
 	}
 	cfg.Timezone = get("TIMEZONE")
 	if cfg.Timezone == "" {

@@ -50,6 +50,7 @@ func TestLoadValid(t *testing.T) {
 		LLMBaseURL:         "http://litellm:4000/v1",
 		LLMAPIKey:          testAPIKey,
 		LLMModel:           "strong",
+		WebSearchModel:     "web-search",
 		HistoryLimit:       12,
 		MaxLoopIterations:  3,
 		ApprovalTTL:        24 * time.Hour,
@@ -66,9 +67,36 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.LLMModel != "cheap" || cfg.HistoryLimit != 30 || cfg.MaxLoopIterations != 8 {
-		t.Errorf("unexpected defaults: model=%q history=%d iterations=%d",
-			cfg.LLMModel, cfg.HistoryLimit, cfg.MaxLoopIterations)
+	if cfg.LLMModel != "cheap" || cfg.WebSearchModel != "web-search" || cfg.HistoryLimit != 30 || cfg.MaxLoopIterations != 8 {
+		t.Errorf("unexpected defaults: model=%q web_search=%q history=%d iterations=%d",
+			cfg.LLMModel, cfg.WebSearchModel, cfg.HistoryLimit, cfg.MaxLoopIterations)
+	}
+}
+
+func TestLoadWebSearchModelDefaultAndOverride(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"unset", "", "web-search"},
+		{"whitespace", "   ", "web-search"},
+		{"custom override", "custom-search", "custom-search"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			if tt.value != "" {
+				env["WEB_SEARCH_MODEL"] = tt.value
+			}
+			cfg, err := load(env)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.WebSearchModel != tt.want {
+				t.Errorf("WebSearchModel = %q, want %q", cfg.WebSearchModel, tt.want)
+			}
+		})
 	}
 }
 
