@@ -20,6 +20,7 @@ services:
       LLM_BASE_URL: http://litellm:4000/v1
       LLM_API_KEY: ${LITELLM_MASTER_KEY:?set it in deploy/.env}
       LLM_MODEL: ${LLM_MODEL:-}
+      WEB_SEARCH_MODEL: ${WEB_SEARCH_MODEL:-}
       HISTORY_LIMIT: ${HISTORY_LIMIT:-}
       MAX_LOOP_ITERATIONS: ${MAX_LOOP_ITERATIONS:-}
       ENABLE_DEMO_TOOLS: ${ENABLE_DEMO_TOOLS:-false}
