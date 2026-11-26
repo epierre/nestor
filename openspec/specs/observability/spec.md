@@ -17,6 +17,10 @@ The system SHALL record every model call with user ID, conversation ID, model na
 - **WHEN** a model call times out
 - **THEN** a model call row exists with status error, the timeout as error text, and the request body
 
+#### Scenario: Web search tool model call recorded
+- **WHEN** a user message triggers `web_search`
+- **THEN** every attempt made by `web_search` is recorded in `model_calls` with the requesting user's ID, the active conversation ID, the configured `WEB_SEARCH_MODEL` alias, latency, tokens, proxy-reported cost (or null), status, and redacted request/response bodies, and structured logs share the turn's `request_id` and `user_id` without logging query or response text
+
 ### Requirement: Cost estimate
 The system SHALL store the cost reported by the proxy for each call when present, and SHALL store null (not zero) when no cost is reported.
 
