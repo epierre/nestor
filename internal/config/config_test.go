@@ -502,3 +502,31 @@ func TestSandboxdURL(t *testing.T) {
 		})
 	}
 }
+
+func TestSystemPromptFileOptionalInLoad(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		set   bool
+		want  string
+	}{
+		{name: "unset", set: false, want: ""},
+		{name: "whitespace", set: true, value: "  \t ", want: ""},
+		{name: "trimmed non-existent path does no disk IO", set: true, value: "  /nonexistent/system_prompt.md  ", want: "/nonexistent/system_prompt.md"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := validEnv()
+			if tt.set {
+				env["SYSTEM_PROMPT_FILE"] = tt.value
+			}
+			cfg, err := load(env)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.SystemPromptPath != tt.want {
+				t.Errorf("SystemPromptPath = %q, want %q", cfg.SystemPromptPath, tt.want)
+			}
+		})
+	}
+}

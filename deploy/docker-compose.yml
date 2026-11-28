@@ -32,11 +32,13 @@ services:
       GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      SYSTEM_PROMPT_FILE: /etc/nestor/system_prompt.md
       MCP_CONFIG: /etc/nestor/mcp.yaml
       SKILLS_CONFIG: /etc/nestor/skills.yaml
       SKILLS_DIR: /etc/nestor/skills
       SANDBOXD_URL: http://sandboxd:8080
     volumes:
+      - ../config/system_prompt.md:/etc/nestor/system_prompt.md:ro
       - ../config/mcp.yaml:/etc/nestor/mcp.yaml:ro
       - ../config/skills.yaml:/etc/nestor/skills.yaml:ro
       - ../skills:/etc/nestor/skills:ro

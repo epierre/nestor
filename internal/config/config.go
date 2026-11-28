@@ -65,6 +65,9 @@ type Config struct {
 	// ApprovalStaleAfter is how long an action may sit approved before it is failed as outcome
 	// unknown.
 	ApprovalStaleAfter time.Duration
+	// SystemPromptPath is the path to the base system prompt file (SYSTEM_PROMPT_FILE). Empty
+	// when unset; the bot daemon requires it at startup while CLI subcommands do not.
+	SystemPromptPath string
 }
 
 // Load reads the configuration through getenv and reports every invalid or missing variable at
@@ -154,6 +157,7 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	cfg.MCPConfigPath = get("MCP_CONFIG")
+	cfg.SystemPromptPath = get("SYSTEM_PROMPT_FILE")
 	cfg.SkillsConfigPath = get("SKILLS_CONFIG")
 	cfg.SkillsDir = get("SKILLS_DIR")
 	if cfg.SkillsConfigPath != "" && cfg.SkillsDir == "" {
