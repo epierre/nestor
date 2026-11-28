@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -17,6 +22,7 @@ import (
 	"github.com/epierre/nestor/internal/config"
 	"github.com/epierre/nestor/internal/identity"
 	"github.com/epierre/nestor/internal/model"
+	"github.com/epierre/nestor/internal/prompt"
 	"github.com/epierre/nestor/internal/store/postgres"
 	"github.com/epierre/nestor/internal/testutil"
 	"github.com/epierre/nestor/internal/tools"
@@ -69,11 +75,12 @@ func TestAgentOptionsComeFromConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLocation: %v", err)
 	}
-	got := agentOptions(config.Config{LLMModel: "strong", HistoryLimit: 12, MaxLoopIterations: 3}, reg, loc)
+	const wantPrompt = "You are Nestor."
+	got := agentOptions(config.Config{LLMModel: "strong", HistoryLimit: 12, MaxLoopIterations: 3}, wantPrompt, reg, loc)
 
-	if got.Model != "strong" || got.SystemPrompt != systemPrompt || got.HistoryLimit != 12 ||
+	if got.Model != "strong" || got.SystemPrompt != wantPrompt || got.HistoryLimit != 12 ||
 		got.MaxIterations != 3 || got.Tools != reg || got.Location != loc {
-		t.Errorf("got %+v, want strong/12/3 with registry and Europe/Zurich", got)
+		t.Errorf("got %+v, want strong/12/3 with prompt, registry and Europe/Zurich", got)
 	}
 }
 
@@ -146,7 +153,7 @@ func TestDemoToolsReachTheModel(t *testing.T) {
 		return model.CompletionResponse{Content: "ok"}, nil
 	}}
 	reg := toolRegistry(true, &fakeNotifier{}, st, client, cfg.WebSearchModel, time.UTC)
-	a := agent.New(client, st, agentOptions(cfg, reg, time.UTC))
+	a := agent.New(client, st, agentOptions(cfg, "test prompt", reg, time.UTC))
 
 	if _, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "hello"); err != nil {
 		t.Fatalf("HandleMessage: %v", err)
@@ -219,7 +226,7 @@ func TestWebSearchEndToEndWithAgent(t *testing.T) {
 	}}
 
 	reg := toolRegistry(false, &fakeNotifier{}, st, client, cfg.WebSearchModel, time.UTC)
-	a := agent.New(client, st, agentOptions(cfg, reg, time.UTC))
+	a := agent.New(client, st, agentOptions(cfg, "test prompt", reg, time.UTC))
 
 	reply1, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "alpha")
 	if err != nil {
@@ -272,4 +279,232 @@ func TestWebSearchEndToEndWithAgent(t *testing.T) {
 			t.Errorf("search req[%d] not isolated: tools=%d msgs=%d", idx, len(reqs[idx].Tools), len(reqs[idx].Messages))
 		}
 	}
+}
+
+func TestLoadSystemPromptAndAgentOptions(t *testing.T) {
+	const sentinel = "SENTINEL-PROMPT-SECRET-TEXT"
+	raw := []byte("\n  You are Nestor. " + sentinel + "  \n")
+	sum := sha256.Sum256(raw)
+	wantSHA := "sha256:" + hex.EncodeToString(sum[:])
+
+	promptPath := filepath.Join(t.TempDir(), "system_prompt.md")
+	if err := os.WriteFile(promptPath, raw, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	cfg := config.Config{
+		LLMModel:          "cheap",
+		HistoryLimit:      10,
+		MaxLoopIterations: 2,
+		SystemPromptPath:  promptPath,
+	}
+	loaded, err := loadSystemPrompt(cfg)
+	if err != nil {
+		t.Fatalf("loadSystemPrompt: %v", err)
+	}
+	if loaded.Text != "You are Nestor. "+sentinel || loaded.Bytes != len(raw) || loaded.SHA256 != wantSHA {
+		t.Fatalf("loaded = %+v, want trimmed text, bytes=%d, sha256=%s", loaded, len(raw), wantSHA)
+	}
+
+	logOutput := logBuf.String()
+	if strings.Contains(logOutput, sentinel) {
+		t.Errorf("startup log leaked prompt text: %s", logOutput)
+	}
+	var logEntry map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(logOutput)), &logEntry); err != nil {
+		t.Fatalf("unmarshal log line %q: %v", logOutput, err)
+	}
+	if logEntry["msg"] != "system prompt loaded" {
+		t.Errorf("msg = %v, want %q", logEntry["msg"], "system prompt loaded")
+	}
+	if logEntry["path"] != promptPath {
+		t.Errorf("path = %v, want %q", logEntry["path"], promptPath)
+	}
+	if int(logEntry["bytes"].(float64)) != len(raw) {
+		t.Errorf("bytes = %v, want %d", logEntry["bytes"], len(raw))
+	}
+	if logEntry["sha256"] != wantSHA {
+		t.Errorf("sha256 = %v, want %q", logEntry["sha256"], wantSHA)
+	}
+
+	client := &testutil.FakeModel{Reply: func(model.CompletionRequest) (model.CompletionResponse, error) {
+		return model.CompletionResponse{Content: "Bonjour."}, nil
+	}}
+	st := testutil.NewFakeStore()
+	reg := tools.NewRegistry()
+	a := agent.New(client, st, agentOptions(cfg, loaded.Text, reg, time.UTC))
+	if _, err := a.HandleMessage(identity.WithUser(context.Background(), 1), "hello"); err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	reqs := client.Requests()
+	if len(reqs) != 1 || len(reqs[0].Messages) == 0 {
+		t.Fatalf("unexpected requests: %+v", reqs)
+	}
+	sysMsg := reqs[0].Messages[0]
+	if sysMsg.Role != model.RoleSystem || !strings.HasPrefix(sysMsg.Content, loaded.Text) {
+		t.Errorf("system message = %+v, want RoleSystem starting with %q", sysMsg, loaded.Text)
+	}
+}
+
+func TestMissingOrInvalidSystemPromptExitsNonZero(t *testing.T) {
+	const (
+		botTokenSecret = "bot-token-sentinel"
+		apiKeySecret   = "api-key-sentinel"
+		dbSecret       = "test-password"
+	)
+	if os.Getenv("NESTOR_TEST_RUN_MAIN") == "1" {
+		main()
+		return
+	}
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (set bool, val string)
+	}{
+		{
+			name:  "unset",
+			setup: func(*testing.T) (bool, string) { return false, "" },
+		},
+		{
+			name: "missing file",
+			setup: func(t *testing.T) (bool, string) {
+				return true, filepath.Join(t.TempDir(), "missing.md")
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T) (bool, string) {
+				return true, t.TempDir()
+			},
+		},
+		{
+			name: "whitespace only",
+			setup: func(t *testing.T) (bool, string) {
+				p := filepath.Join(t.TempDir(), "blank.md")
+				if err := os.WriteFile(p, []byte(" \t\n "), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return true, p
+			},
+		},
+		{
+			name: "nul byte",
+			setup: func(t *testing.T) (bool, string) {
+				p := filepath.Join(t.TempDir(), "nul.md")
+				if err := os.WriteFile(p, []byte("hello\x00world"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return true, p
+			},
+		},
+		{
+			name: "invalid utf8",
+			setup: func(t *testing.T) (bool, string) {
+				p := filepath.Join(t.TempDir(), "badutf8.md")
+				if err := os.WriteFile(p, []byte{0xff, 0xfe, 'a'}, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return true, p
+			},
+		},
+		{
+			name: "oversized 4097 bytes",
+			setup: func(t *testing.T) (bool, string) {
+				p := filepath.Join(t.TempDir(), "big.md")
+				if err := os.WriteFile(p, []byte(strings.Repeat("a", prompt.MaxBytes+1)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return true, p
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			set, val := tc.setup(t)
+			cmd := exec.Command(os.Args[0], "-test.run=^TestMissingOrInvalidSystemPromptExitsNonZero$")
+			env := []string{
+				"NESTOR_TEST_RUN_MAIN=1",
+				"TELEGRAM_BOT_TOKEN=" + botTokenSecret,
+				"ALLOWED_TELEGRAM_USERS=123:Owner",
+				"DATABASE_URL=postgres://nestor:" + dbSecret + "@127.0.0.1:1/nestor",
+				"LLM_BASE_URL=http://127.0.0.1:1/v1",
+				"LLM_API_KEY=" + apiKeySecret,
+			}
+			if set {
+				env = append(env, "SYSTEM_PROMPT_FILE="+val)
+			}
+			cmd.Env = env
+
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatalf("got error %v, want exit status 1; output: %s", err, out)
+			}
+			if !strings.Contains(string(out), "SYSTEM_PROMPT_FILE") {
+				t.Errorf("output %s does not name SYSTEM_PROMPT_FILE", out)
+			}
+			for _, secret := range []string{botTokenSecret, apiKeySecret, dbSecret} {
+				if strings.Contains(string(out), secret) {
+					t.Errorf("output leaked secret %q: %s", secret, out)
+				}
+			}
+		})
+	}
+}
+
+func TestAdminSubcommandsRunWithoutSystemPromptFile(t *testing.T) {
+	env := map[string]string{
+		"TELEGRAM_BOT_TOKEN":     "bot-token",
+		"ALLOWED_TELEGRAM_USERS": "123:Owner",
+		"DATABASE_URL":           "postgres://nestor:pw@127.0.0.1:1/nestor?connect_timeout=1",
+		"LLM_BASE_URL":           "http://127.0.0.1:1/v1",
+		"LLM_API_KEY":            "sk-test",
+	}
+	getenv := func(k string) string { return env[k] }
+
+	t.Run("credentials", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runCredentials(context.Background(), []string{"set", "1", "tok"}, getenv, strings.NewReader("val"), &out)
+		if err == nil || strings.Contains(err.Error(), "SYSTEM_PROMPT_FILE") {
+			t.Fatalf("runCredentials error = %v, should not require SYSTEM_PROMPT_FILE", err)
+		}
+		if !strings.Contains(err.Error(), "CREDENTIALS_KEY") {
+			t.Errorf("runCredentials error = %v, want CREDENTIALS_KEY check after config.Load", err)
+		}
+	})
+
+	t.Run("mcp", func(t *testing.T) {
+		var out bytes.Buffer
+		err := runMCP(context.Background(), []string{"approve", "srv", "tool"}, getenv, &out)
+		if err == nil || strings.Contains(err.Error(), "SYSTEM_PROMPT_FILE") {
+			t.Fatalf("runMCP error = %v, should not require SYSTEM_PROMPT_FILE", err)
+		}
+		if !strings.Contains(err.Error(), "open store") {
+			t.Errorf("runMCP error = %v, want open store error after config.Load", err)
+		}
+	})
+
+	t.Run("skills", func(t *testing.T) {
+		root := t.TempDir()
+		skillDir := filepath.Join(root, "demo")
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: demo\ndescription: Demo.\n---\nHi.\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := skillsCommand(root, []string{"pin", "demo"}, &out); err != nil {
+			t.Fatalf("skillsCommand: %v", err)
+		}
+		if !strings.Contains(out.String(), "hash: sha256:") {
+			t.Errorf("skillsCommand output = %q, want hash", out.String())
+		}
+	})
 }

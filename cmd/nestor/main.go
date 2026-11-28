@@ -23,6 +23,7 @@ import (
 	"github.com/epierre/nestor/internal/mcp"
 	"github.com/epierre/nestor/internal/model"
 	"github.com/epierre/nestor/internal/obs"
+	"github.com/epierre/nestor/internal/prompt"
 	"github.com/epierre/nestor/internal/reminders"
 	"github.com/epierre/nestor/internal/skills"
 	"github.com/epierre/nestor/internal/store"
@@ -32,10 +33,7 @@ import (
 	"github.com/epierre/nestor/internal/websearch"
 )
 
-const (
-	platformTelegram = "telegram"
-	systemPrompt     = "You are Nestor, a helpful personal assistant. Be concise."
-)
+const platformTelegram = "telegram"
 
 func main() {
 	slog.SetDefault(slog.New(obs.NewHandler(slog.NewJSONHandler(os.Stdout, nil))))
@@ -60,6 +58,10 @@ func run() error {
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	loadedPrompt, err := loadSystemPrompt(cfg)
+	if err != nil {
+		return fmt.Errorf("load system prompt: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -123,7 +125,7 @@ func run() error {
 	gate := approval.New(st, registry, cfg.ApprovalTTL)
 	bot.SetDecider(gate)
 	go reminders.Run(ctx, st, bot, reminderTick)
-	opts := agentOptions(cfg, registry, loc)
+	opts := agentOptions(cfg, loadedPrompt.Text, registry, loc)
 	opts.Skills = catalog
 	opts.Approvals = gate
 	opts.Cards = bot
@@ -172,9 +174,22 @@ func notifySelf(notifier chatNotifier) tools.MessageSender {
 	}
 }
 
+// loadSystemPrompt validates SYSTEM_PROMPT_FILE and logs content-free provenance metadata.
+func loadSystemPrompt(cfg config.Config) (prompt.Loaded, error) {
+	if cfg.SystemPromptPath == "" {
+		return prompt.Loaded{}, errors.New("SYSTEM_PROMPT_FILE is required")
+	}
+	loaded, err := prompt.LoadFile(cfg.SystemPromptPath)
+	if err != nil {
+		return prompt.Loaded{}, err
+	}
+	slog.Info("system prompt loaded", "path", cfg.SystemPromptPath, "bytes", loaded.Bytes, "sha256", loaded.SHA256)
+	return loaded, nil
+}
+
 // agentOptions turns the configuration into agent options, offering the model the registry and
 // local time zone.
-func agentOptions(cfg config.Config, reg *tools.Registry, loc *time.Location) agent.Options {
+func agentOptions(cfg config.Config, systemPrompt string, reg *tools.Registry, loc *time.Location) agent.Options {
 	return agent.Options{
 		Model:         cfg.LLMModel,
 		SystemPrompt:  systemPrompt,
