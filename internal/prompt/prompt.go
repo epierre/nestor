@@ -93,3 +93,16 @@ func RepoFile() (string, error) {
 		dir = parent
 	}
 }
+
+// LoadForEval loads the prompt from SYSTEM_PROMPT_FILE when set, otherwise from RepoFile().
+func LoadForEval(getenv func(string) string) (Loaded, error) {
+	path := strings.TrimSpace(getenv("SYSTEM_PROMPT_FILE"))
+	if path == "" {
+		var err error
+		path, err = RepoFile()
+		if err != nil {
+			return Loaded{}, err
+		}
+	}
+	return LoadFile(path)
+}

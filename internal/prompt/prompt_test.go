@@ -185,3 +185,55 @@ func TestRepoSystemPrompt(t *testing.T) {
 		t.Error("system_prompt.md must not contain HTML comments (<!--)")
 	}
 }
+
+func TestLoadForEval(t *testing.T) {
+	t.Run("uses SYSTEM_PROMPT_FILE when set", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "override.md")
+		if err := os.WriteFile(p, []byte("  Custom eval prompt.  "), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadForEval(func(k string) string {
+			if k == "SYSTEM_PROMPT_FILE" {
+				return " " + p + " "
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatalf("LoadForEval: %v", err)
+		}
+		if got.Text != "Custom eval prompt." {
+			t.Errorf("Text = %q, want %q", got.Text, "Custom eval prompt.")
+		}
+	})
+
+	t.Run("falls back to RepoFile when unset", func(t *testing.T) {
+		repoPath, err := RepoFile()
+		if err != nil {
+			t.Fatalf("RepoFile: %v", err)
+		}
+		want, err := LoadFile(repoPath)
+		if err != nil {
+			t.Fatalf("LoadFile: %v", err)
+		}
+		got, err := LoadForEval(func(string) string { return "  " })
+		if err != nil {
+			t.Fatalf("LoadForEval: %v", err)
+		}
+		if got != want {
+			t.Errorf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("returns error when override is missing", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "missing.md")
+		_, err := LoadForEval(func(k string) string {
+			if k == "SYSTEM_PROMPT_FILE" {
+				return missing
+			}
+			return ""
+		})
+		if err == nil || !strings.Contains(err.Error(), "SYSTEM_PROMPT_FILE") {
+			t.Errorf("err = %v, want error naming SYSTEM_PROMPT_FILE", err)
+		}
+	})
+}
