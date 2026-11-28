@@ -96,6 +96,7 @@ Changes 9 and 10 depend only on change 2 and can be pulled earlier.
 cmd/nestor/          Entrypoint
 cmd/mcp-timezone/    Reference MCP server: read-only time zone tools
 cmd/sandboxd/        Sidecar that runs skill scripts in throwaway containers with no network
+config/system_prompt.md  Reviewed base persona and purpose system prompt (UTF-8, <= 4096 bytes)
 config/mcp.yaml      MCP servers Nestor may use, with the risk of each allowlisted tool
 config/skills.yaml   Reviewed skills, their pinned hashes and the users who get them
 skills/              Skill folders (SKILL.md plus reference files), one per skill
@@ -136,6 +137,7 @@ Set these in `deploy/.env`, which git ignores (validated by [`internal/config/co
 | `LITELLM_MASTER_KEY` | Yes | Key Nestor uses to reach the LiteLLM proxy. Must start with `sk-` |
 | `GEMINI_API_KEY` | Yes | Provider key for the `cheap` and `strong` aliases in `deploy/litellm.yaml`. Stays inside the LiteLLM container |
 | `ANTHROPIC_API_KEY` | No | Optional provider key if an Anthropic model is enabled in `deploy/litellm.yaml`. Stays inside the LiteLLM container |
+| `SYSTEM_PROMPT_FILE` | Yes (bot daemon) | Path to the reviewed UTF-8 system prompt file (`<= 4096` bytes). Set by `docker-compose.yml`, which mounts [`config/system_prompt.md`](config/system_prompt.md) read-only. CLI subcommands (`credentials`, `mcp`, `skills`) do not require it |
 | `LLM_MODEL` | No | Model alias to use. Default `cheap` |
 | `HISTORY_LIMIT` | No | Messages of the conversation sent to the model. Default `30` |
 | `MAX_LOOP_ITERATIONS` | No | Model calls allowed for one message. Default `8` |

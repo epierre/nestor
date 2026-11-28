@@ -269,3 +269,42 @@ func TestLiteLLMConfigDefinesWebSearchAlias(t *testing.T) {
 	}
 	t.Fatal("litellm.yaml missing web-search entry in model_list")
 }
+
+func TestSystemPromptMountedReadOnlyOnNestorOnly(t *testing.T) {
+	raw, err := os.ReadFile("docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read compose file: %v", err)
+	}
+	var c compose
+	if err := yaml.Unmarshal(raw, &c); err != nil {
+		t.Fatalf("parse compose file: %v", err)
+	}
+
+	nestor, ok := c.Services["nestor"]
+	if !ok {
+		t.Fatal("missing nestor service")
+	}
+	const (
+		wantEnv = "/etc/nestor/system_prompt.md"
+		wantVol = "../config/system_prompt.md:/etc/nestor/system_prompt.md:ro"
+	)
+	if got := nestor.Environment["SYSTEM_PROMPT_FILE"]; got != wantEnv {
+		t.Errorf("nestor SYSTEM_PROMPT_FILE = %q, want %q", got, wantEnv)
+	}
+	if !slices.Contains(nestor.Volumes, wantVol) {
+		t.Errorf("nestor volumes %v missing %q", nestor.Volumes, wantVol)
+	}
+	for name, s := range c.Services {
+		if name == "nestor" {
+			continue
+		}
+		if _, exists := s.Environment["SYSTEM_PROMPT_FILE"]; exists {
+			t.Errorf("service %q must not define SYSTEM_PROMPT_FILE", name)
+		}
+		for _, v := range s.Volumes {
+			if strings.Contains(v, "system_prompt.md") {
+				t.Errorf("service %q must not mount system_prompt.md (%q)", name, v)
+			}
+		}
+	}
+}
